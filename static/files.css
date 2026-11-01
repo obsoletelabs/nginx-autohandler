@@ -148,3 +148,11 @@ dialog.quick .ask-input { margin-top: 0; font-size: 14px; }
 .file-tab .nav-dot { margin-left: 1px; }
 .filebar #tbNew { align-self: center; flex: none; }
 @media (max-width: 760px) { .filebar { padding: 0 8px; } .file-switch { max-width: 45%; } }
+
+/* Pinned tabs (Overview, Files) stay at the left while the others scroll and can be dragged into any order. */
+.pinned-tabs { flex: none; display: flex; align-items: flex-end; gap: 2px; padding-right: 8px; margin-right: 2px; border-right: 1px solid var(--line); }
+.file-tab { user-select: none; -webkit-user-select: none; }
+.file-tab:not(.pinned) { cursor: grab; touch-action: pan-y; }
+.file-tab.pinned { padding-right: 12px; }
+.file-tabs.reordering .file-tab { cursor: grabbing; }
+.file-tab.dragging { opacity: .9; box-shadow: 0 3px 12px rgba(0, 0, 0, .28); z-index: 2; }

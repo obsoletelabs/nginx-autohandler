@@ -761,14 +761,85 @@ function renderTopBar(file) {
   renderTabs();
 }
 
+const PINNED_TABS = ["home", "files"];
+let suppressTabClick = false;
+
+// Drag a tab sideways to reorder it. The tab swaps places with a neighbour once the pointer passes
+// that neighbour's middle; the order is saved when the pointer is released.
+function beginTabDrag(event, tab, bar) {
+  if (event.button !== 0 || event.target.closest(".tab-close")) return;
+  const startX = event.clientX;
+  let dragging = false;
+  const middle = (item) => { const box = item.getBoundingClientRect(); return box.left + box.width / 2; };
+  const move = (e) => {
+    if (e.buttons === 0) { finish(); return; }  // the button was released somewhere we did not see
+    if (!dragging) {
+      if (Math.abs(e.clientX - startX) < 6) return;
+      dragging = true;
+      tab.classList.add("dragging");
+      bar.classList.add("reordering");
+    }
+    const siblings = [...bar.querySelectorAll(".file-tab")];
+    const index = siblings.indexOf(tab);
+    const before = siblings[index - 1];
+    const after = siblings[index + 1];
+    if (before && e.clientX < middle(before)) bar.insertBefore(tab, before);
+    else if (after && e.clientX > middle(after)) bar.insertBefore(after, tab);
+    const box = bar.getBoundingClientRect();
+    if (e.clientX < box.left + 28) bar.scrollLeft -= 14;
+    else if (e.clientX > box.right - 28) bar.scrollLeft += 14;
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (!dragging) return;
+    tab.classList.remove("dragging");
+    bar.classList.remove("reordering");
+    suppressTabClick = true;
+    setTimeout(() => { suppressTabClick = false; }, 0);
+    prefs.openTabs = [...PINNED_TABS, ...[...bar.querySelectorAll(".file-tab")].map((item) => item.dataset.tab)];
+    savePrefs();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+// Keyboard reordering (Ctrl+Shift+Left/Right on a focused tab).
+function moveTab(path, delta) {
+  const rest = prefs.openTabs.filter((key) => !PINNED_TABS.includes(key));
+  const index = rest.indexOf(path);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= rest.length) return;
+  rest.splice(target, 0, rest.splice(index, 1)[0]);
+  prefs.openTabs = [...PINNED_TABS, ...rest];
+  savePrefs();
+  renderTabs();
+  $$(".file-tab", $("#fileBar")).find((item) => item.dataset.tab === path)?.focus();
+}
+
 function renderTabs() {
   if (!state.doc) return;
   const shown = viewKey();
-  if (!prefs.openTabs.includes(shown)) {
-    prefs.openTabs.push(shown);
+  // Overview and Files are pinned to the left, in that order; the rest keep the order the user gave them.
+  const ordered = [...PINNED_TABS, ...prefs.openTabs.filter((key) => !PINNED_TABS.includes(key))];
+  if (!ordered.includes(shown)) ordered.push(shown);
+  if (ordered.length !== prefs.openTabs.length || ordered.some((key, i) => key !== prefs.openTabs[i])) {
+    prefs.openTabs = ordered;
     savePrefs();
   }
   const bar = $("#fileTabs");
+  const pinnedBar = $("#pinnedTabs");
+  if (!bar.dataset.wheel) {
+    bar.dataset.wheel = "1";
+    // A mouse wheel scrolls the tabs sideways when they overflow.
+    bar.addEventListener("wheel", (event) => {
+      if (bar.scrollWidth <= bar.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      bar.scrollLeft += event.deltaY;
+      event.preventDefault();
+    }, { passive: false });
+  }
   const names = prefs.openTabs.map((path) => keyLabel(path));
   const tabs = prefs.openTabs.map((path) => {
     const view = isViewKey(path);
@@ -776,34 +847,42 @@ function renderTabs() {
     if (!view && !file) return null;
     const info = file ? fileInfo(file) : { changed: false, isNew: false };
     const active = path === shown;
+    const pinned = PINNED_TABS.includes(path);
     const name = keyLabel(path);
     const dir = !view && path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
     const duplicate = names.filter((other) => other === name).length > 1;
     const tab = el("div", {
-      class: "file-tab" + (active ? " active" : ""), role: "tab", tabindex: active ? "0" : "-1", "aria-selected": String(active),
+      class: "file-tab" + (active ? " active" : "") + (pinned ? " pinned" : ""), role: "tab", tabindex: active ? "0" : "-1", "aria-selected": String(active),
       "data-tab": path, title: path + (info.changed || info.isNew ? " (unsaved changes)" : ""),
     },
       view ? el("span", { class: "tab-icon", text: keyIcon(path) }) : null,
       el("span", { class: "tab-name" }, duplicate && dir ? el("span", { class: "tab-dir", text: dir.split("/").pop() + "/" }) : null, name),
       info.changed || info.isNew ? el("span", { class: "nav-dot", title: "Unsaved changes" }) : null,
-      el("button", { class: "tab-close", type: "button", tabindex: "-1", title: "Close tab (middle-click)", "aria-label": `Close ${path}`, text: "×",
+      pinned ? null : el("button", { class: "tab-close", type: "button", tabindex: "-1", title: "Close tab (middle-click)", "aria-label": `Close ${path}`, text: "×",
         onclick: (event) => { event.stopPropagation(); closeTab(path).catch(report); } }),
     );
-    tab.addEventListener("click", () => openKey(path).catch(report));
+    if (!pinned) tab.addEventListener("pointerdown", (event) => beginTabDrag(event, tab, bar));
+    tab.addEventListener("click", () => { if (!suppressTabClick) openKey(path).catch(report); });
     tab.addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
-    tab.addEventListener("auxclick", (event) => { if (event.button === 1) { event.preventDefault(); closeTab(path).catch(report); } });
+    tab.addEventListener("auxclick", (event) => { if (event.button === 1 && !pinned) { event.preventDefault(); closeTab(path).catch(report); } });
     tab.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openKey(path).catch(report); }
-      else if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); closeTab(path).catch(report); }
+      else if ((event.key === "Delete" || event.key === "Backspace") && !pinned) { event.preventDefault(); closeTab(path).catch(report); }
+      else if ((event.key === "ArrowRight" || event.key === "ArrowLeft") && event.ctrlKey && event.shiftKey) {
+        event.preventDefault();
+        moveTab(path, event.key === "ArrowRight" ? 1 : -1);
+      }
       else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-        const all = $$(".file-tab", bar);
+        const all = $$(".file-tab", $("#fileBar"));
         const next = all[all.indexOf(tab) + (event.key === "ArrowRight" ? 1 : -1)];
         if (next) { event.preventDefault(); next.focus(); }
       }
     });
     return tab;
   }).filter(Boolean);
-  bar.replaceChildren(...tabs);
+  const isPinned = (tab) => PINNED_TABS.includes(tab.dataset.tab);
+  pinnedBar.replaceChildren(...tabs.filter(isPinned));
+  bar.replaceChildren(...tabs.filter((tab) => !isPinned(tab)));
   const active = bar.querySelector(".file-tab.active");
   if (active) {
     const left = active.offsetLeft - bar.offsetLeft;
@@ -814,6 +893,7 @@ function renderTabs() {
 
 // Closing a tab only hides it: the file stays in the document with its edits.
 async function closeTab(path) {
+  if (PINNED_TABS.includes(path)) return;
   const index = prefs.openTabs.indexOf(path);
   if (index < 0) return;
   const remaining = prefs.openTabs.filter((item) => item !== path);
