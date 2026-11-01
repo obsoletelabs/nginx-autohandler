@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import pathlib
@@ -14,6 +15,13 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# Keep every test off the real /var/lib and /etc: the modules read these paths when they are imported.
+_SCRATCH = tempfile.mkdtemp(prefix="autohandler-tests-")
+os.environ["NGINX_AUTOHANDLER_DATA"] = os.path.join(_SCRATCH, "data")
+os.environ["NGINX_CONF_ROOT"] = os.path.join(_SCRATCH, "conf")
+os.makedirs(os.environ["NGINX_CONF_ROOT"])
+atexit.register(shutil.rmtree, _SCRATCH, True)
 
 import certs  # noqa: E402
 import ipsync  # noqa: E402
