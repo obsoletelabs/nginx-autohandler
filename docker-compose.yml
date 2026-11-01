@@ -1,0 +1,25 @@
+services:
+  nginx-ui:
+    build: .
+    image: nginx-ui:local
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"   # editor UI, bound to all interfaces; put your TLS reverse proxy in front
+    environment:
+      NGINX_AUTO_RELOAD: ${NGINX_AUTO_RELOAD:-true}
+      NGINX_UI_BACKUP_KEEP: ${NGINX_UI_BACKUP_KEEP:-4}
+      UI_USER: ${UI_USER:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      CLOUDFLARE_DOMAINS: ${CLOUDFLARE_DOMAINS:-}
+      CLOUDFLARE_IP_SYNC: ${CLOUDFLARE_IP_SYNC:-true}
+      CLOUDFLARE_DNS_FROM_CONFIGS: ${CLOUDFLARE_DNS_FROM_CONFIGS:-true}
+      CLOUDFLARE_PROXIED: ${CLOUDFLARE_PROXIED:-false}
+      CLOUDFLARE_CHECK_INTERVAL_SECONDS: ${CLOUDFLARE_CHECK_INTERVAL_SECONDS:-600}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+    volumes:
+      - ./data/nginx:/etc/nginx
+      - ./data/ui:/var/lib/nginx-ui
+      - ./data/certs:/etc/letsencrypt

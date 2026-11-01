@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nginx-ui</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">nginx<span>ui</span></div>
+  <span id="authBadge" class="badge"></span>
+  <span id="reloadBadge" class="badge"></span>
+  <span class="spacer"></span>
+  <button id="btnDns" class="ghost">Cloudflare DNS</button>
+  <button id="btnTest" class="ghost">Test config</button>
+  <button id="btnReload" class="ghost">Reload nginx</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <div class="crumbs" id="crumbs"></div>
+      <button id="btnNewFile" class="icon" title="New file">+</button>
+    </div>
+    <nav id="tree" class="tree" aria-label="Config files"></nav>
+  </aside>
+
+  <main class="workspace">
+    <div id="empty" class="empty">
+      <h2>No file open</h2>
+      <p>Pick a config from the list, or create one with +.</p>
+    </div>
+
+    <div id="editorPane" class="editor-pane hidden">
+      <div class="toolbar">
+        <div class="file-title">
+          <span id="fileName"></span>
+          <span id="dirtyDot" class="dirty hidden" title="Unsaved changes">unsaved</span>
+        </div>
+        <div class="segmented" role="tablist">
+          <button id="modeRaw" class="seg active" role="tab" aria-selected="true">Raw</button>
+          <button id="modeBlocks" class="seg" role="tab" aria-selected="false">Blocks</button>
+        </div>
+        <button id="btnHistory" class="ghost">History</button>
+        <button id="btnDelete" class="ghost danger">Delete</button>
+        <button id="btnSave" class="primary">Save</button>
+      </div>
+
+      <textarea id="editor" spellcheck="false" aria-label="Raw config"></textarea>
+      <div id="blocks" class="blocks hidden" aria-label="Block editor"></div>
+    </div>
+
+    <section class="log">
+      <div class="log-head">
+        <span>Activity</span>
+        <button id="btnClearLog" class="link">Clear</button>
+      </div>
+      <pre id="output"></pre>
+    </section>
+  </main>
+</div>
+
+<dialog id="dlgDns">
+  <form method="dialog" class="dialog">
+    <h2>Cloudflare DNS</h2>
+    <p id="dnsSummary" class="muted"></p>
+    <label class="field">
+      <span>Domains kept pointing at this host (one per line)</span>
+      <textarea id="dnsDomains" rows="8" spellcheck="false"></textarea>
+    </label>
+    <p class="muted small">Domains from <code>server_name</code> in your configs are added automatically on save.</p>
+    <div class="dialog-actions">
+      <button id="btnSaveDomains" type="button" class="ghost">Save domains</button>
+      <button id="btnSyncDns" type="button" class="primary">Sync now</button>
+      <button class="ghost" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgHistory">
+  <form method="dialog" class="dialog">
+    <h2>History</h2>
+    <p id="historyFile" class="muted"></p>
+    <ul id="historyList" class="history"></ul>
+    <div class="dialog-actions">
+      <button class="ghost" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
