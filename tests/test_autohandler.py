@@ -409,6 +409,38 @@ class GitSyncTests(unittest.TestCase):
             self.assertEqual(self.gs._scrub("fatal: https://x:sekret@host/a failed sekret"), "fatal: https://***@host/a failed ***")
 
 
+class WindowsFilesTests(unittest.TestCase):
+    def test_crlf_files_parse_without_carriage_returns_in_comments(self):
+        text = "# note\r\nserver {\r\n    listen 80; # inline\r\n}\r\n"
+        nodes = parse(text, "a.conf")
+        comments = [node.text for node in nodes] + [child.text for node in nodes for child in node.children if child.kind == "comment"]
+        self.assertTrue(comments)
+        self.assertTrue(all("\r" not in comment for comment in comments))
+
+    def test_saving_keeps_crlf(self):
+        self.assertEqual(server.match_line_endings("a\r\nb\r\n", "x\ny\n"), "x\r\ny\r\n")
+        self.assertEqual(server.match_line_endings("a\nb\n", "x\ny\n"), "x\ny\n")
+        self.assertEqual(server.match_line_endings(None, "x\ny\n"), "x\ny\n")
+
+    def test_certificates_are_not_requested_for_underscore_or_regex_names(self):
+        default = ("server { listen 443 ssl default_server; server_name _;\n"
+                   " ssl_certificate /etc/letsencrypt/live/site.example/fullchain.pem; }")
+        site = ("server { server_name a.example.com ~^img\\d+\\.example\\.com$ 10.0.0.1;\n"
+                " ssl_certificate /etc/letsencrypt/live/site.example/fullchain.pem; }")
+        with mock.patch.object(certs, "CONFIG_DIR", tempfile.gettempdir() + "/none-here"):
+            wanted = server.wanted_certificates([default, site])
+        self.assertEqual(wanted, {"site.example": ["a.example.com"]})
+
+    def test_missing_certificates_are_left_to_nginx_when_there_is_no_token_or_email(self):
+        text = ("server { server_name a.example.com;\n ssl_certificate /etc/letsencrypt/live/x/fullchain.pem; }")
+        values = {"cloudflare_api_token": "", "acme_email": ""}
+        real_get = settings.get
+        with mock.patch.object(settings, "get", side_effect=lambda k: values[k] if k in values else real_get(k)), \
+                mock.patch.object(certs, "issue") as issue:
+            self.assertEqual(server.issue_missing_certificates([text]), [])
+        issue.assert_not_called()
+
+
 class IpConfirmationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

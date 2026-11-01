@@ -3,7 +3,15 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const clone = value => structuredClone(value);
-const uid = () => crypto.randomUUID();
+// randomUUID only exists on https and localhost; plain http on a LAN address needs the fallback.
+const uid = () => {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 const state = {doc:null, file:'', mode:'blocks', selected:null, palette:[], known:new Set(), rules:{}, tableContexts:new Set(), scopeInfo:null, dragData:null, history:[], future:[], dirty:false, rawDirty:false, rendered:null, renderVersion:0, revision:0, inspectorDraft:null, argumentDraft:null, argumentPending:null,recipes:[],hints:{},includeLinks:{},customDraft:null,basicDirty:false,basicForms:[],basicRootAreas:[],checkVersion:0,lastCheck:null};
 const colors = {Structure:['var(--c-b07843)','var(--c-faf1e5)'],Routing:['var(--c-4b83bd)','var(--c-eff5fc)'],Headers:['var(--c-8b67b7)','var(--c-f5effb)'],Behavior:['var(--c-3b947a)','var(--c-edf7f2)'],TLS:['var(--c-bf778b)','var(--c-fcf1f5)'],Custom:['var(--c-77838e)','var(--c-f0f3f5)']};
 state.customDrafts={};

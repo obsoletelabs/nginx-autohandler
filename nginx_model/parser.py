@@ -33,7 +33,7 @@ def lex(text: str, path: str = "config") -> list[Token]:
             start = i
             while i < len(text) and text[i] != "\n":
                 i += 1
-            tokens.append(Token("comment", text[start:i], line))
+            tokens.append(Token("comment", text[start:i].rstrip("\r"), line))  # CRLF files end comments with CR
             continue
         if ch in "{};":
             tokens.append(Token(ch, ch, line))

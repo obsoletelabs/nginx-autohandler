@@ -305,8 +305,20 @@ def baseline(content):
 LIVE_CERT = re.compile(r"^/etc/letsencrypt/live/([^/]+)/fullchain\.pem$")
 
 
+def certifiable(name):
+    """True for a name a certificate can be issued for: a real host name or a *.wildcard, not _, a regex or an IP."""
+    name = name.strip("'\"").lower()
+    return certs.HOST_RE.match(name) is not None and not name.split(".")[-1].isdigit()
+
+
+MAX_AUTO_CERT_NAMES = 20
+
+
 def wanted_certificates(contents):
-    """Certificates the configs point at that are not on disk yet: {lineage: [server names]}."""
+    """Certificates the configs point at that are not on disk yet: {lineage: [server names]}.
+
+    Names from every server block that uses the certificate are gathered; names that cannot be on a
+    certificate (_, regular expressions, IP addresses) are left out."""
     wanted = {}
     for content in contents:
         try:
@@ -324,19 +336,34 @@ def wanted_certificates(contents):
                 match = LIVE_CERT.match(child.args[0].strip("'\""))
                 if not match or Path(certs.CONFIG_DIR, "live", match.group(1), "fullchain.pem").exists():
                     continue
-                wanted.setdefault(match.group(1), names)
-    return wanted
+                wanted.setdefault(match.group(1), set()).update(names)
+    return {lineage: sorted(name.strip("'\"").lower() for name in names if certifiable(name))
+            for lineage, names in wanted.items()}
 
 
 def issue_missing_certificates(contents):
-    """Issue each missing certificate for its server_name domains. Raises before anything is written."""
+    """Issue each missing certificate for its server_name domains. Raises before anything is written.
+
+    Only done when a Cloudflare token and a contact email are set, and only for a sensible number of names;
+    otherwise the certificate is left for nginx -t to report, so importing a working setup never fails here."""
     issued = []
+    if not (settings.get("cloudflare_api_token") and settings.get("acme_email")):
+        return issued
     for lineage, names in sorted(wanted_certificates(contents).items()):
+        if not names or len(names) > MAX_AUTO_CERT_NAMES:
+            continue
         ok, output = certs.issue(names, settings.get("acme_email"), settings.get("acme_staging"), name=lineage)
         if not ok:
             raise certs.CertError(f"certificate for {lineage} failed: {certs.explain(output)}")
         issued.append(lineage)
     return issued
+
+
+def match_line_endings(current, content):
+    """Write `content` with the line endings `current` already uses, so editing a CRLF file keeps it CRLF."""
+    if current and "\r\n" in current and current.count("\r\n") * 2 >= current.count("\n"):
+        return content.replace("\r\n", "\n").replace("\n", "\r\n")
+    return content
 
 
 def apply_workspace(files, delete=()):
@@ -355,7 +382,7 @@ def apply_workspace(files, delete=()):
             current = read_exact(path) if path.is_file() else None
             if current is not None and baseline(current) == content:
                 continue
-            changes.append((path, current, content))
+            changes.append((path, current, match_line_endings(current, content)))
         removals = []
         for key in sorted(set(delete) - set(files)):
             path = safe_path(key)
