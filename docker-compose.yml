@@ -3,6 +3,8 @@ services:
     build: .
     image: nginx-ui:local
     restart: unless-stopped
+    # The default bridge avoids creating a new Docker network, which fails when address pools are full.
+    network_mode: bridge
     ports:
       - "80:80"
       - "443:443"
