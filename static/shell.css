@@ -1,0 +1,130 @@
+/* Shell around the Workshop editor: top bar, settings and certificates dialogs, and the
+   Apply and History pieces. Reuses the Workshop's tokens and dialog classes. */
+.brand { display: flex; align-items: center; gap: 10px; }
+.logo { display: block; border-radius: 7px; }
+.brand-text { font-size: 16px; color: var(--muted); white-space: nowrap; font-weight: 500; letter-spacing: -.2px; }
+.brand-text b { color: var(--ink); font-weight: 750; }
+.spacer { flex: 1; }
+.tool-group { display: flex; gap: 2px; padding-left: 12px; margin-left: 4px; border-left: 1px solid var(--line); }
+.topbar { height: auto; min-height: 60px; padding: 10px 18px; gap: 8px; flex-wrap: wrap; justify-content: flex-start; }
+.pill { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--c-f4f6f8); color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+.pill.on { color: var(--green); border-color: var(--c-cfe7de); background: var(--c-f1faf6); }
+.pill.locked { color: var(--blue); border-color: var(--c-cddcec); background: var(--c-f3f8fd); }
+#dlgAsk { width: min(440px, 92vw); }
+#dlgAsk .dialog-intro { margin: 8px 0 0; }
+.ask-input { width: 100%; margin-top: 14px; font: 13px var(--mono); padding: 9px 11px; border: 1px solid var(--c-dce0e3); border-radius: 7px; color: var(--ink); }
+.ask-input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 3px var(--c-eb693c2e); }
+.ask-input.invalid { border-color: var(--c-d64545); }
+#dlgAsk .dialog-actions { margin-top: 18px; }
+#dlgAsk button.danger-solid { background: var(--c-d64545); border-color: var(--c-d64545); color: var(--on-accent); }
+#dlgSettings, #dlgCerts, #historyDialog { width: min(780px, 94vw); max-height: 90vh; overflow: auto; }
+#dlgDns { width: min(560px, 94vw); }
+dialog .dialog-heading { margin-bottom: 14px; }
+dialog .dialog-actions { margin-top: 16px; }
+dialog .field { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 12px; }
+dialog textarea { font: 12px var(--mono); color: var(--ink); border: 1px solid var(--c-dce0e3); border-radius: 7px; padding: 9px; resize: vertical; }
+dialog textarea:focus { outline: none; border-color: var(--orange); }
+.check { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 13px; }
+.sub { font-size: 11px; margin: 16px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; font-weight: 700; }
+.setting-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.setting { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--c-fbfcfd); }
+.setting-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+.setting-label { font-weight: 650; }
+.setting-control { display: flex; gap: 8px; align-items: center; }
+.setting-control input.cell, .setting-control select.cell { flex: 1; font: 13px var(--mono); padding: 7px 9px; border: 1px solid var(--c-dce0e3); border-radius: 7px; color: var(--ink); min-width: 0; }
+.setting-control input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--orange); }
+.setting-control button:disabled { opacity: .45; }
+.pre { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--c-fbfcfd); border: 1px solid var(--line); border-radius: 7px; padding: 10px; max-height: 240px; overflow: auto; }
+.result-message { margin: 0 0 8px; font-size: 13px; white-space: pre-wrap; }
+.history li { display: flex; justify-content: space-between; align-items: center; padding: 8px 2px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12px; }
+.history { list-style: none; margin: 0; padding: 0; max-height: 340px; overflow: auto; }
+@media (max-width: 860px) {
+  .tool-group { border-left: 0; padding-left: 0; margin-left: 0; }
+  .brand-text { font-size: 14px; }
+}
+
+/* One scroll container per region: the page never scrolls; the palette, canvas and inspector do. */
+html, body { height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; height: 100vh; }
+.topbar, .document-bar, .workbar, .check-banner, .statusbar { flex: none; }
+.topbar { height: auto; min-height: 60px; }
+.document-bar { padding: 14px 24px 12px; }
+.workspace { flex: 1; height: auto; min-height: 0; grid-template-columns: 236px minmax(0, 1fr) 330px; }
+.left-panel { min-height: 0; overflow: hidden; padding: 14px 14px 0; }
+.palette { flex: 1; min-height: 0; overflow: auto; padding-bottom: 14px; }
+.editor-panel, .right-panel { min-height: 0; }
+.right-content { min-height: 0; }
+
+/* File list: each file shows its domains and whether it serves TLS, with clone beside it. */
+.file-row { display: flex; align-items: stretch; gap: 2px; margin: 0 0 4px; }
+.file-row .file-button { flex: 1; min-width: 0; margin: 0; flex-wrap: wrap; row-gap: 2px; align-items: center; }
+.file-row.active .file-button { border-color: var(--c-eb693c); }
+.file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-meta { flex-basis: 100%; padding-left: 20px; font-family: var(--sans); font-size: 11px; color: var(--c-7d858c); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tls { font-size: 9px; font-weight: 700; letter-spacing: .6px; color: var(--c-2f9276); border: 1px solid var(--c-2f9276); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
+.file-clone { padding: 0 8px; color: var(--c-7d858c); border: 0; background: transparent; }
+.file-clone:hover { color: var(--c-242c35); }
+
+/* Library: the file list keeps to about a third of the panel and the block list scrolls under it.
+   These rules come after features.css, which sets the palette to grow instead of scroll. */
+.left-panel > .file-list { flex: 0 0 auto; max-height: 34%; overflow: auto; }
+.left-panel > .palette { flex: 1 1 0; min-height: 0; overflow: auto; }
+
+/* Dark mode: accent colours stay on borders and markers; text uses the ink colour on a dark tint. */
+:root[data-theme="dark"] .palette-block,
+:root[data-theme="dark"] .node,
+:root[data-theme="dark"] .node-card { color: var(--ink); }
+:root[data-theme="dark"] .palette-block { background: color-mix(in srgb, var(--block) 18%, var(--paper)); }
+:root[data-theme="dark"] .node-card { background: color-mix(in srgb, var(--block) 12%, var(--paper)); }
+:root[data-theme="dark"] .node-block > .node-card > .node-head { background: color-mix(in srgb, var(--block) 22%, var(--paper)); }
+:root[data-theme="dark"] .node-card:before { background: var(--paper); }
+:root[data-theme="dark"] .node-children { border-bottom-color: color-mix(in srgb, var(--block) 35%, var(--paper)); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .palette-block,
+  :root:not([data-theme="light"]) .node,
+  :root:not([data-theme="light"]) .node-card { color: var(--ink); }
+  :root:not([data-theme="light"]) .palette-block { background: color-mix(in srgb, var(--block) 18%, var(--paper)); }
+  :root:not([data-theme="light"]) .node-card { background: color-mix(in srgb, var(--block) 12%, var(--paper)); }
+  :root:not([data-theme="light"]) .node-block > .node-card > .node-head { background: color-mix(in srgb, var(--block) 22%, var(--paper)); }
+  :root:not([data-theme="light"]) .node-card:before { background: var(--paper); }
+  :root:not([data-theme="light"]) .node-children { border-bottom-color: color-mix(in srgb, var(--block) 35%, var(--paper)); }
+}
+
+/* Dark mode for the Basic view and dialogs: their cards were hard-coded white. */
+:root[data-theme="dark"] .basic-card,
+:root[data-theme="dark"] .advanced-area,
+:root[data-theme="dark"] textarea { background: var(--c-ffffff); }
+:root[data-theme="dark"] .basic-card input,
+:root[data-theme="dark"] .basic-card select,
+:root[data-theme="dark"] textarea,
+:root[data-theme="dark"] .setting-control input.cell,
+:root[data-theme="dark"] .setting-control select.cell { background: #1b1b1b; color: #e6ebf0; border-color: #3a3f45; }
+:root[data-theme="dark"] .basic-card label,
+:root[data-theme="dark"] .basic-card .field > span,
+:root[data-theme="dark"] .field-hint,
+:root[data-theme="dark"] .basic-section-title,
+:root[data-theme="dark"] .basic-intro p,
+:root[data-theme="dark"] .hint,
+:root[data-theme="dark"] .file-meta,
+:root[data-theme="dark"] .palette-note p { color: #9aa5b1; }
+:root[data-theme="dark"] .basic-card-heading strong { color: #9cc3e6; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .basic-card,
+  :root:not([data-theme="light"]) .advanced-area,
+  :root:not([data-theme="light"]) textarea { background: var(--c-ffffff); }
+  :root:not([data-theme="light"]) .basic-card input,
+  :root:not([data-theme="light"]) .basic-card select,
+  :root:not([data-theme="light"]) textarea,
+  :root:not([data-theme="light"]) .setting-control input.cell,
+  :root:not([data-theme="light"]) .setting-control select.cell { background: #1b1b1b; color: #e6ebf0; border-color: #3a3f45; }
+  :root:not([data-theme="light"]) .basic-card label,
+  :root:not([data-theme="light"]) .basic-card .field > span,
+  :root:not([data-theme="light"]) .field-hint,
+  :root:not([data-theme="light"]) .basic-section-title,
+  :root:not([data-theme="light"]) .basic-intro p,
+  :root:not([data-theme="light"]) .hint,
+  :root:not([data-theme="light"]) .file-meta,
+  :root:not([data-theme="light"]) .palette-note p { color: #9aa5b1; }
+  :root:not([data-theme="light"]) .basic-card-heading strong { color: #9cc3e6; }
+}
+.tool-group .quiet { padding-left: 11px; padding-right: 11px; }

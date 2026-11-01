@@ -1,0 +1,105 @@
+/* Block shapes in the Blocks view only. Statements are plates with a notch cut into the top edge and a
+   matching tab hanging off the bottom edge; scopes are C-shaped (head bar, indented children, thick arm).
+   Colours, layout and everything else about the editor are untouched.
+
+   Geometry (all in one place so the tab and the notch can never disagree):
+     - a block sits directly on the one above it: the drop zones between blocks keep their hit area but take
+       no space (negative margins), and the 1px bottom border of the upper block is the 1px top border of the
+       lower one, so there is no gap and no double border;
+     - every notch and every tab is --nub-w wide and --nub-h deep, and starts --nub-x from the OUTER left edge of
+       its block, whatever the thickness of that block's own left border (that is what --bl compensates for);
+     - the tab in a scope's head lands in the notch of its first child (the child column is inset by
+       --kid-margin + --kid-indent), and the last child's tab lands in the arm. */
+
+.node {
+  margin: 0; --nub-w: 26px; --nub-h: 7px; --nub-x: 23px;
+  --edge: color-mix(in srgb, var(--block) 30%, white); --arm: color-mix(in srgb, var(--block) 26%, white);
+  --face: var(--tint); --head-bg: color-mix(in srgb, var(--block) 13%, white); --cut: var(--c-fafbfc);
+}
+.node-card { border-radius: 8px; border-color: var(--edge); box-shadow: 0 1px 0 color-mix(in srgb, var(--block) 22%, transparent), 0 2px 5px rgba(20, 30, 45, .07); transition: box-shadow .15s, transform .15s; box-sizing: border-box; }
+.node-card:hover { box-shadow: 0 1px 0 color-mix(in srgb, var(--block) 30%, transparent), 0 4px 10px rgba(20, 30, 45, .11); }
+
+/* Lists: drop zones overlap the seams instead of pushing blocks apart. */
+.node-list { display: flow-root; padding: 1px 0 8px; }
+.node-children > .node-list { padding: 0 0 1px; }
+.node-list > .drop-zone { margin: -8px 0 -7px; pointer-events: none; }
+.node-list > .drop-zone.empty { margin: 0; pointer-events: auto; }
+body.dragging .node-list > .drop-zone { pointer-events: auto; }
+/* While something is being dragged the blocks pull apart so the snap targets are easy to read. */
+body.dragging .node-card::before, body.dragging .node-card::after, body.dragging .node-head::after { display: none; }
+
+/* The notch cut into the top edge. */
+.node-card { --bl: 1px; }
+.node-block > .node-card { --bl: 8px; }
+.node-card:before {
+  top: -1px; left: calc(var(--nub-x) - var(--bl)); width: var(--nub-w); height: var(--nub-h); box-sizing: border-box;
+  border-radius: 0 0 7px 7px; background: var(--cut); border: 1px solid var(--edge); border-top: 0;
+}
+/* The tab hanging off the bottom edge: the same box as the notch of the block underneath. */
+.node > .node-card::after {
+  content: ""; position: absolute; left: calc(var(--nub-x) - var(--bl)); bottom: calc(-1 * var(--nub-h)); width: var(--nub-w); height: var(--nub-h); box-sizing: border-box; z-index: 1; pointer-events: none;
+  background: var(--face); border: 1px solid var(--edge); border-top: 0; border-radius: 0 0 7px 7px;
+}
+/* Comments are blocks too (muted, dashed outline), so they carry the same notch and tab and a stack interlocks through them. */
+.node-comment > .node-card { border: 1px dashed var(--edge); background: var(--tint); box-shadow: none; --bl: 1px; }
+.node-comment > .node-card::before { display: block; }
+
+/* Sections that are not blocks (custom code, includes) keep a little air and take no tab. */
+.node-list > .code-group { margin: 8px 0; }
+.node:has(+ .drop-zone + :not(.node)) > .node-card::after { display: none; }
+
+/* Touching corners are squared off so a stack reads as one run. */
+.node + .drop-zone + .node > .node-card { border-top-left-radius: 3px; border-top-right-radius: 3px; }
+.node:has(+ .drop-zone + .node) > .node-card { border-bottom-left-radius: 3px; border-bottom-right-radius: 3px; }
+
+/* Scopes. */
+.node-block > .node-card { --kid-margin: 10px; --kid-indent: 12px; border-left-width: 8px; border-radius: 9px 9px 9px 12px; }
+.node-block > .node-card > .node-head { border-radius: 4px 7px 0 0; position: relative; z-index: 2; }
+.node-block > .node-card::after { background: var(--arm); border-color: var(--arm); }
+.node-children { margin: 0 0 0 var(--kid-margin); padding: 0 10px 0 var(--kid-indent); border-radius: 10px 0 0 12px; border-bottom: 9px solid var(--arm); box-shadow: inset 3px 3px 6px rgba(20, 30, 45, .06); position: relative; }
+.node-block > .node-card > .node-children { margin-bottom: 0; }
+/* The tab under the head bar drops into the notch of the first child. */
+.node-block > .node-card > .node-head::after {
+  content: ""; position: absolute; left: calc(var(--kid-margin) + var(--kid-indent) + var(--nub-x)); bottom: calc(1px - var(--nub-h)); width: var(--nub-w); height: var(--nub-h); box-sizing: border-box; pointer-events: none;
+  background: var(--head-bg); border: 1px solid var(--edge); border-top: 0; border-radius: 0 0 7px 7px;
+}
+.node-block > .node-card:has(> .node-children > .node-list > .drop-zone.empty) > .node-head::after { display: none; }
+
+/* Selected and receiving states keep the same silhouette. */
+.node.selected > .node-card { box-shadow: 0 0 0 2px var(--block), 0 3px 10px rgba(20, 30, 45, .12); }
+.node.selected > .node-card::after { box-shadow: 0 2px 0 -1px var(--block); }
+
+/* Dark mode: borders and caps follow the surface instead of white. */
+:root[data-theme="dark"] .node { --edge: color-mix(in srgb, var(--block) 55%, var(--paper)); --arm: color-mix(in srgb, var(--block) 35%, var(--paper)); --face: color-mix(in srgb, var(--block) 12%, var(--paper)); --head-bg: color-mix(in srgb, var(--block) 22%, var(--paper)); --cut: var(--paper); }
+:root[data-theme="dark"] .node-card { box-shadow: 0 1px 0 rgba(0, 0, 0, .45), 0 2px 6px rgba(0, 0, 0, .35); }
+:root[data-theme="dark"] .node-children { box-shadow: inset 3px 3px 7px rgba(0, 0, 0, .35); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .node { --edge: color-mix(in srgb, var(--block) 55%, var(--paper)); --arm: color-mix(in srgb, var(--block) 35%, var(--paper)); --face: color-mix(in srgb, var(--block) 12%, var(--paper)); --head-bg: color-mix(in srgb, var(--block) 22%, var(--paper)); --cut: var(--paper); }
+  :root:not([data-theme="light"]) .node-card { box-shadow: 0 1px 0 rgba(0, 0, 0, .45), 0 2px 6px rgba(0, 0, 0, .35); }
+  :root:not([data-theme="light"]) .node-children { box-shadow: inset 3px 3px 7px rgba(0, 0, 0, .35); }
+}
+
+/* Include blocks read as ONE thing: a thick frame in the block's own colour (an inset shadow, so the notch and tab
+   geometry above is untouched; the top and bottom bars only appear where the block is not stacked on a neighbour,
+   because a stacked seam is the shared edge), and the file preview inside uses the block's colours. */
+.node:has(> .node-card > .include-info) > .node-card.node-card {
+  --frame-t: 0 0 0 0 transparent; --frame-b: 0 0 0 0 transparent;
+  border-color: var(--block);
+  box-shadow: inset 3px 0 0 var(--block), inset -3px 0 0 var(--block), var(--frame-t), var(--frame-b), 0 2px 5px rgba(20, 30, 45, .08);
+}
+.node:has(> .node-card > .include-info) > .node-card.node-card:hover { box-shadow: inset 3px 0 0 var(--block), inset -3px 0 0 var(--block), var(--frame-t), var(--frame-b), 0 4px 10px rgba(20, 30, 45, .14); }
+.node:has(> .node-card > .include-info).selected > .node-card.node-card { box-shadow: inset 3px 0 0 var(--block), inset -3px 0 0 var(--block), var(--frame-t), var(--frame-b), 0 0 0 2px var(--block), 0 3px 10px rgba(20, 30, 45, .12); }
+.node-list > .drop-zone:first-child + .node:has(> .node-card > .include-info) > .node-card { --frame-t: inset 0 3px 0 var(--block); }
+.node:has(> .node-card > .include-info):has(+ .drop-zone:last-child) > .node-card { --frame-b: inset 0 -3px 0 var(--block); }
+.node:has(> .node-card > .include-info) > .node-card > .node-head { background: transparent; }
+.node:has(> .node-card > .include-info) .argument,
+.node:has(> .node-card > .include-info) .argument-add,
+.node:has(> .node-card > .include-info) .argument-remove { background: color-mix(in srgb, var(--block) 9%, transparent); border: 1px solid color-mix(in srgb, var(--block) 45%, transparent); color: var(--block); }
+.node:has(> .node-card > .include-info) .argument { color: var(--ink); }
+.node:has(> .node-card > .include-info) .argument-add:hover, .node:has(> .node-card > .include-info) .node-inline-actions .tiny:hover { background: color-mix(in srgb, var(--block) 18%, transparent); }
+.node:has(> .node-card > .include-info) .node-inline-actions .tiny { background: transparent; border-color: color-mix(in srgb, var(--block) 45%, transparent); color: var(--block); }
+.node:has(> .node-card > .include-info) .node-inline-actions .tiny.danger { color: #c0392b; }
+.node:has(> .node-card > .include-info) .include-info { background: transparent; border-top: 1px solid color-mix(in srgb, var(--block) 40%, transparent); color: var(--block); }
+.node:has(> .node-card > .include-info) .include-info summary { color: var(--block); font-weight: 600; }
+.node:has(> .node-card > .include-info) .include-info pre { background: color-mix(in srgb, var(--block) 7%, transparent); border: 1px solid color-mix(in srgb, var(--block) 35%, transparent); color: var(--ink); }
+.node:has(> .node-card > .include-info) .include-info button { background: transparent; border: 1px solid color-mix(in srgb, var(--block) 45%, transparent); color: var(--block); }

@@ -1,591 +1,318 @@
-"use strict";
+'use strict';
 
-const $ = (id) => document.getElementById(id);
-const INDENT = "    ";
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const clone = value => structuredClone(value);
+const uid = () => crypto.randomUUID();
+const state = {doc:null, file:'', mode:'blocks', selected:null, palette:[], known:new Set(), rules:{}, tableContexts:new Set(), scopeInfo:null, dragData:null, history:[], future:[], dirty:false, rawDirty:false, rendered:null, renderVersion:0, revision:0, inspectorDraft:null, argumentDraft:null, argumentPending:null,recipes:[],hints:{},includeLinks:{},customDraft:null,basicDirty:false,basicForms:[],basicRootAreas:[],checkVersion:0,lastCheck:null};
+const colors = {Structure:['var(--c-b07843)','var(--c-faf1e5)'],Routing:['var(--c-4b83bd)','var(--c-eff5fc)'],Headers:['var(--c-8b67b7)','var(--c-f5effb)'],Behavior:['var(--c-3b947a)','var(--c-edf7f2)'],TLS:['var(--c-bf778b)','var(--c-fcf1f5)'],Custom:['var(--c-77838e)','var(--c-f0f3f5)']};
+state.customDrafts={};
+let toastTimer;
 
-const S = {
-  config: null,
-  root: "",
-  dir: "",
-  file: null,   // open file, relative to root
-  content: "",  // last loaded or saved raw text
-  nodes: null,  // parsed tree while in Blocks mode
-  mode: "raw",  // "raw" | "blocks"
-  dirty: false,
-};
-
-// ---------------------------------------------------------------- helpers
-
-function log(msg) {
-  const out = $("output");
-  const stamp = new Date().toLocaleTimeString();
-  out.textContent += `[${stamp}] ${msg}\n`;
-  out.scrollTop = out.scrollHeight;
-}
-
-const report = (e) => log("Error: " + e.message);
-
-function el(tag, className, text) {
+function el(tag, attrs={}, ...children) {
   const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
+  for (const [key,value] of Object.entries(attrs)) {
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else if (key === 'value') node.value = value;
+    else if (key === 'checked') node.checked = value;
+    else if (key === 'disabled') node.disabled = value;
+    else if (key === 'style') Object.assign(node.style, value);
+    else node.setAttribute(key,value);
+  }
+  for (const child of children.flat()) if (child !== null && child !== undefined) node.append(typeof child === 'string' ? document.createTextNode(child) : child);
   return node;
 }
 
-async function api(method, url, body) {
-  const opts = { method, headers: { "X-Requested-With": "nginx-autohandler" } };
-  if (body !== undefined) {
-    opts.headers["Content-Type"] = "application/json";
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, opts);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+async function api(path, payload) {
+  const response = await fetchRetry(path, payload === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'nginx-autohandler'},body:JSON.stringify(payload)});
+  const data = await response.json().catch(()=>({}));
+  if (!response.ok) throw new Error(errorText(data.error) || `The server answered ${response.status}.`);
   return data;
 }
+function toast(text) { $('#toast').textContent=text; $('#toast').classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5000); }
+function action(fn) { return async (...args)=> { try { await fn(...args); } catch(error) { reportError(error); } }; }
+function currentFile() { return state.doc.files.find(file=>file.path === state.file); }
+function flatten(nodes, parent=null, out=[]) { for (const node of nodes) { out.push({node,parent}); flatten(node.children,node.id,out); } return out; }
+function locate(id) { for (const file of state.doc.files) { const hit=findIn(file.nodes,id); if(hit) return {...hit,file}; } return null; }
+function findIn(nodes,id,parent=null) { for(let index=0;index<nodes.length;index++){ const node=nodes[index]; if(node.id===id) return {node,nodes,index,parent}; const nested=findIn(node.children,id,node.id); if(nested) return nested; } return null; }
+function newNode(name,args=[],kind='directive',children=[]) { return {id:uid(),kind,name,args,children,text:'',line:null}; }
+function textNode(text) { return {...newNode('',[],'comment'),text}; }
+function renderNodes(nodes,depth=0) { return nodes.map(n=> n.kind==='comment' ? '    '.repeat(depth)+n.text+'\n' : '    '.repeat(depth)+[n.name,...n.args].join(' ')+(n.kind==='block' ? ' {\n'+renderNodes(n.children,depth+1)+'    '.repeat(depth)+'}\n' : ';\n')).join(''); }
+function groupFor(node) { return state.palette.find(p=>p.name===node.name)?.group || (state.known.has(node.name)?'Behavior':'Custom'); }
+function decorate(node,group) { const [color,tint]=colors[group]||colors.Custom; node.style.setProperty('--block',color);node.style.setProperty('--tint',tint); }
+function snapshot() { state.history.push(clone(state.doc)); if(state.history.length>70)state.history.shift();state.future=[]; }
+function remember() { try { localStorage.setItem('nginx-workshop-draft',JSON.stringify({document:state.doc,dirty:state.dirty})); } catch { /* Disk library remains available if browser storage is full. */ } }
+function changed(message) { state.dirty=true;state.rawDirty=false;state.rendered=null;remember();render();if(message)toast(message); }
+function mutate(fn,message) { snapshot();fn();changed(message); }
+function setDocument(doc,dirty=false) { state.doc=doc;state.revision=doc.revision;chooseStartFile(doc);state.selected=null;state.scopeInfo=null;state.includeLinks={};state.inspectorDraft=null;state.customDraft=null;state.customDrafts={};state.argumentDraft=null;state.basicDirty=false;state.lastCheck=null;state.history=[];state.future=[];state.dirty=dirty;state.rawDirty=false;state.rendered=null;remember();render();afterDocumentLoad(); }
+async function allowReplace() { if(state.dirty || state.rawDirty || state.inspectorDraft || state.customDraft || state.basicDirty || state.argumentDraft) return (await ask({title:'Discard unapplied edits?',message:'Changes you have not applied to nginx will be lost.',ok:'Discard',danger:true}))===true;return true; }
 
-function fmtSize(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-  return (n / 1024 / 1024).toFixed(1) + " MB";
+// The document is named after the folder it was loaded from; that is not a title, so a folder name shows as a friendly one.
+function documentTitle(name) {
+  const root=($('#configRoot').textContent||'').replace(/[\\/]+$/,'');
+  const folder=root.split(/[\\/]/).pop();
+  return !name||name===folder||name==='Imported configuration'?'Nginx configuration':name;
 }
-
-function splitArgs(text) {
-  return text.match(/"[^"]*"|'[^']*'|\S+/g) || [];
+function render() {
+  if(!state.doc)return;
+  if(!state.doc.files.some(f=>f.path===state.file))state.file=state.doc.entrypoint;
+  if(state.selected&&!locate(state.selected))state.selected=null;
+  $('#documentName').value=documentTitle(state.doc.name);$('#documentName').title='Config root: '+($('#configRoot').textContent||'');
+  $('#savedLabel').textContent=state.doc.revision?`REVISION ${state.doc.revision}`:'UNSAVED DRAFT';
+  $('#changeStatus').textContent=state.dirty?'Unsaved changes':'All changes saved';
+  if(!state.doc.revision&&!state.dirty)$('#changeStatus').textContent='Example · save to keep';
+  $('#fileCount').textContent=`${state.doc.files.length} file${state.doc.files.length===1?'':'s'}`;
+  const all=state.doc.files.flatMap(file=>flatten(file.nodes));
+  $('#nodeCount').textContent=`${all.filter(n=>n.node.kind!=='comment').length} blocks & directives`;
+  $('#contextLabel').textContent=state.doc.context.toUpperCase()+' CONTEXT';
+  $('#undoBtn').disabled=!state.history.length;
+  $('#redoBtn').disabled=!state.future.length;
+  $$('.mode-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.mode===state.mode));
+  renderFileList();renderFileHeader();renderPalette();renderCanvas();renderInspector();renderSettings();schedulePreview();scheduleAutoCheck();
 }
-
-function setDirty(value) {
-  S.dirty = value;
-  $("dirtyDot").classList.toggle("hidden", !value);
-}
-
-function showPane(name) {
-  $("empty").classList.toggle("hidden", name !== "empty");
-  $("editorPane").classList.toggle("hidden", name !== "editor");
-}
-
-// ---------------------------------------------------------------- file tree
-
-async function loadDir(dir) {
-  const data = await api("GET", "/api/tree?path=" + encodeURIComponent(dir));
-  S.root = data.root;
-  S.dir = data.path;
-  $("crumbs").textContent = data.root + (data.path ? "/" + data.path : "");
-
-  const tree = $("tree");
-  tree.textContent = "";
-  if (S.dir) tree.append(entryRow({ name: "..", path: parentOf(S.dir), dir: true, size: null }));
-  for (const entry of data.entries) tree.append(entryRow(entry));
-  if (!data.entries.length && !S.dir) tree.append(el("div", "hint", "No files yet. Use + to add one."));
-}
-
-function parentOf(dir) {
-  return dir.split("/").slice(0, -1).join("/");
-}
-
-function entryRow(entry) {
-  const row = el("div", "entry" + (entry.dir ? " dir" : ""));
-  if (!entry.dir && entry.path === S.file) row.classList.add("active");
-  row.append(el("span", "", entry.dir ? entry.name + "/" : entry.name));
-  if (!entry.dir && entry.size !== null) row.append(el("span", "size", fmtSize(entry.size)));
-  row.onclick = () => (entry.dir ? loadDir(entry.path) : openFile(entry.path)).catch(report);
-  return row;
-}
-
-// ---------------------------------------------------------------- open, save, apply
-
-function confirmDiscard() {
-  return !S.dirty || confirm("Discard unsaved changes?");
-}
-
-async function openFile(path) {
-  if (!confirmDiscard()) return;
-  const data = await api("GET", "/api/file?path=" + encodeURIComponent(path));
-  S.file = data.path;
-  S.content = data.content;
-  S.nodes = null;
-  S.mode = "raw";
-  setModeButtons();
-  $("editor").value = data.content;
-  $("fileName").textContent = data.path;
-  setDirty(false);
-  showPane("editor");
-  await loadDir(S.dir);
-}
-
-async function currentContent() {
-  if (S.mode === "raw") return $("editor").value;
-  const data = await api("POST", "/api/blocks/render", { nodes: S.nodes });
-  return data.content;
-}
-
-function describeApply(result, path) {
-  if (!result.ok) {
-    log(`Not saved: nginx rejected ${path}. The previous version is back in place.`);
-  } else if (result.saved) {
-    log(`Saved ${path}` + (result.reloaded ? " and reloaded nginx." : "."));
-  } else {
-    log("No changes to save.");
-  }
-  if (result.output) log(result.output);
-  if (result.dns) {
-    if (result.dns.error) log("DNS: " + result.dns.error);
-    else for (const [domain, outcome] of Object.entries(result.dns.results)) log(`DNS ${domain}: ${outcome}`);
-  }
-  return result.ok;
-}
-
-async function save() {
-  if (!S.file) return;
-  const content = await currentContent();
-  const result = await api("PUT", "/api/file", { path: S.file, content });
-  if (describeApply(result, S.file)) {
-    S.content = content;
-    if (S.mode === "raw") $("editor").value = content;
-    setDirty(false);
-  }
-}
-
-async function newFile() {
-  if (!confirmDiscard()) return;
-  const base = S.dir ? S.root + "/" + S.dir : S.root;
-  const name = prompt(`New file, relative to ${base}\n(e.g. conf.d/example.conf)`);
-  if (!name || !name.trim()) return;
-  const path = S.dir ? S.dir + "/" + name.trim() : name.trim();
-  const result = await api("POST", "/api/file", { path, content: "" });
-  describeApply(result, path);
-  await loadDir(S.dir);
-  await openFile(path);
-}
-
-async function removeFile() {
-  if (!S.file || !confirm(`Delete ${S.file}? A backup is kept.`)) return;
-  const result = await api("DELETE", "/api/file", { path: S.file });
-  describeApply(result, S.file);
-  if (result.ok) {
-    S.file = null;
-    setDirty(false);
-    showPane("empty");
-  }
-  await loadDir(S.dir);
-}
-
-// ---------------------------------------------------------------- raw / blocks modes
-
-function setModeButtons() {
-  const raw = S.mode === "raw";
-  $("modeRaw").classList.toggle("active", raw);
-  $("modeBlocks").classList.toggle("active", !raw);
-  $("modeRaw").setAttribute("aria-selected", raw);
-  $("modeBlocks").setAttribute("aria-selected", !raw);
-  $("editor").classList.toggle("hidden", !raw);
-  $("blocks").classList.toggle("hidden", raw);
-}
-
-async function setMode(mode) {
-  if (mode === S.mode) return;
-  if (mode === "blocks") {
-    const data = await api("POST", "/api/blocks/parse", { content: $("editor").value });
-    S.nodes = data.nodes;
-    S.mode = "blocks";
-    renderBlocks();
-  } else {
-    $("editor").value = await currentContent();
-    S.nodes = null;
-    S.mode = "raw";
-  }
-  setModeButtons();
-}
-
-function markDirty() {
-  setDirty(true);
-}
-
-function newNode(kind, name, args, depth) {
-  return {
-    kind,
-    name: kind === "comment" ? "" : name,
-    args: kind === "comment" ? [] : args,
-    children: [],
-    text: kind === "comment" ? name : "",
-    line: null,
-  };
-}
-
-function renderBlocks() {
-  const root = $("blocks");
-  root.textContent = "";
-  const wrap = el("div", "block-root");
-  wrap.append(nodeList(S.nodes, 0));
-  wrap.append(addRow(S.nodes, 0, true));
-  root.append(wrap);
-}
-
-function nodeList(list, depth) {
-  const container = el("div", "node-list");
-  list.forEach((node, index) => container.append(nodeView(list, index, depth)));
-  return container;
-}
-
-function nodeView(list, index, depth) {
-  const node = list[index];
-
-  if (node.kind === "comment") {
-    const row = el("div", "node-row comment-row");
-    const text = el("input", "cell comment");
-    text.value = node.text;
-    text.setAttribute("aria-label", "Comment");
-    text.oninput = () => { node.text = text.value; markDirty(); };
-    row.append(text, nodeActions(list, index, depth));
-    return row;
-  }
-
-  const wrap = el("div", "node" + (node.kind === "block" ? " block" : ""));
-  const row = el("div", "node-row");
-
-  const name = el("input", "cell name");
-  name.value = node.name;
-  name.setAttribute("aria-label", "Directive name");
-  name.oninput = () => { node.name = name.value.trim(); markDirty(); };
-
-  const args = el("input", "cell");
-  args.value = node.args.join(" ");
-  args.placeholder = node.kind === "block" ? "arguments, e.g. ~ ^/api/" : "arguments, e.g. 127.0.0.1:3000";
-  args.setAttribute("aria-label", "Arguments");
-  args.oninput = () => { node.args = splitArgs(args.value); markDirty(); };
-
-  row.append(name, args, nodeActions(list, index, depth));
-  wrap.append(row);
-
-  if (node.kind === "block") {
-    const kids = el("div", "node-children");
-    kids.append(nodeList(node.children, depth + 1));
-    kids.append(addRow(node.children, depth + 1, false));
-    wrap.append(kids);
-  }
-  return wrap;
-}
-
-function nodeActions(list, index, depth) {
-  const actions = el("div", "node-actions");
-  actions.append(
-    actionButton("Up", "Move up", () => move(list, index, -1)),
-    actionButton("Down", "Move down", () => move(list, index, 1)),
-    actionButton("Remove", "Remove", () => {
-      list.splice(index, 1);
-      markDirty();
-      renderBlocks();
-    }, "danger"),
-  );
-  return actions;
-}
-
-function actionButton(label, title, onClick, extra) {
-  const btn = el("button", extra || "", label);
-  btn.title = title;
-  btn.onclick = onClick;
-  return btn;
-}
-
-function move(list, index, delta) {
-  const target = index + delta;
-  if (target < 0 || target >= list.length) return;
-  [list[index], list[target]] = [list[target], list[index]];
-  markDirty();
-  renderBlocks();
-}
-
-function addRow(list, depth, isRoot) {
-  const row = el("div", "add-row" + (isRoot ? " root" : ""));
-  row.append(
-    actionButton("+ Directive", "Add a directive", () => {
-      const text = prompt("Directive, e.g.:  listen 80");
-      if (!text || !text.trim()) return;
-      const [name, ...args] = splitArgs(text.trim().replace(/;$/, ""));
-      if (!name) return;
-      list.push(newNode("directive", name, args, depth));
-      markDirty();
-      renderBlocks();
-    }),
-    actionButton("+ Block", "Add a block, e.g. location /", () => {
-      const text = prompt("Block header, e.g.:  location /api/");
-      if (!text || !text.trim()) return;
-      const [name, ...args] = splitArgs(text.trim());
-      if (!name) return;
-      list.push(newNode("block", name, args, depth));
-      markDirty();
-      renderBlocks();
-    }),
-    actionButton("+ Comment", "Add a comment line", () => {
-      list.push(newNode("comment", "# ", [], depth));
-      markDirty();
-      renderBlocks();
-    }),
-  );
-  return row;
-}
-
-// ---------------------------------------------------------------- nginx actions
-
-async function testConfig() {
-  const r = await api("POST", "/api/test");
-  log((r.ok ? "Config test passed." : "Config test FAILED.") + (r.output ? "\n" + r.output : ""));
-}
-
-async function reloadNginx() {
-  const r = await api("POST", "/api/reload");
-  log((r.ok ? "Reloaded nginx." : "Reload refused: the config test failed.") + (r.output ? "\n" + r.output : ""));
-}
-
-// ---------------------------------------------------------------- history
-
-async function openHistory() {
-  if (!S.file) return;
-  $("historyFile").textContent = S.file;
-  const list = $("historyList");
-  list.textContent = "";
-  const data = await api("GET", "/api/backups?path=" + encodeURIComponent(S.file));
-  if (!data.backups.length) list.append(el("li", "muted", "No backups yet."));
-  for (const backup of data.backups) {
-    const item = el("li");
-    item.append(el("span", "", backup.time));
-    item.append(actionButton("Restore", "Restore this version", async () => {
-      if (!confirm(`Restore ${S.file} from ${backup.time}? The current version is backed up first.`)) return;
-      const result = await api("POST", "/api/restore", { path: S.file, backup: backup.name });
-      describeApply(result, S.file);
-      if (result.ok) await openFile(S.file);
-      $("dlgHistory").close();
-    }));
-    list.append(item);
-  }
-  $("dlgHistory").showModal();
-}
-
-// ---------------------------------------------------------------- DNS
-
-async function openDns() {
-  const data = await api("GET", "/api/dns");
-  if (!data.configured) {
-    $("dnsSummary").textContent = "Cloudflare is off. Add an API token in Settings to enable it.";
-  } else {
-    const results = Object.entries(data.results || {}).map(([d, r]) => `${d}: ${r}`).join("\n");
-    $("dnsSummary").textContent = data.last_run
-      ? `Last sync ${data.last_run} to ${data.ip}.${data.error ? " Error: " + data.error : ""}\n${results}`
-      : "Not synced yet this session.";
-  }
-  $("dnsDomains").value = (data.domains || []).join("\n");
-  $("dnsDomains").disabled = !data.configured;
-  $("btnSyncDns").disabled = !data.configured;
-  $("btnSaveDomains").disabled = !data.configured;
-  $("dlgDns").showModal();
-}
-
-// ---------------------------------------------------------------- settings
-
-const SETTING_INPUTS = new Map(); // key -> { read(), changed(), kind }
-
-function sourceLabel(item) {
-  if (item.source === "env") return `from environment (${item.env})`;
-  if (item.source === "ui") return "saved in the UI";
-  return "default";
-}
-
-function settingRow(item) {
-  const row = el("div", "setting");
-  const head = el("div", "setting-head");
-  head.append(el("span", "setting-label", item.label), el("span", "badge" + (item.source === "env" ? " locked" : ""), sourceLabel(item)));
-  row.append(head);
-
-  const control = el("div", "setting-control");
-  let input;
-  let initial;
-  if (item.kind === "bool") {
-    input = el("input");
-    input.type = "checkbox";
-    input.checked = item.value;
-    initial = item.value;
-    input.onchange = () => markChanged(item.key);
-    control.append(input);
-    SETTING_INPUTS.set(item.key, { read: () => input.checked, changed: () => input.checked !== initial });
-  } else if (item.kind === "choice") {
-    input = el("select", "cell");
-    for (const choice of item.choices) {
-      const opt = el("option", "", choice);
-      opt.value = choice;
-      input.append(opt);
+// renderFileList and renderFileHeader (the file navigator) live in files.js.
+function renderPalette() {
+  const search=$('#paletteSearch').value.toLowerCase();
+  const box=$('#palette');box.replaceChildren();
+  renderRecipes(box,search);
+  for(const group of Object.keys(colors).filter(g=>g!=='Custom')) {
+    const items=state.palette.filter(item=>item.group===group&&item.name.includes(search));
+    if(!items.length)continue;
+    box.append(el('div',{class:'palette-group-title',text:group.toUpperCase()}));
+    for(const item of items) {
+      const button=el('button',{class:'palette-block',draggable:'false','data-directive':item.name,title:(state.hints[item.name]||`Add ${item.name}`)+` Contexts: ${item.contexts.join(', ')}`,onclick:action(()=>addTemplate(item))},item.name,el('span',{text:item.kind==='block'?'⊏':'＋'}));
+      decorate(button,group);
+      const valid=canPlace({...item,children:[]},selectedParent());
+      button.classList.toggle('scope-unavailable',!valid);button.setAttribute('aria-disabled',String(!valid));
+      if(!valid)button.title=`Select a compatible scope (${item.contexts.join(', ')}), or drag this block to one.`;
+      button.addEventListener('dragstart',event=>{event.dataTransfer.setData('application/json',JSON.stringify({template:item}));event.dataTransfer.effectAllowed='copy';startDrag({template:item});});
+      button.addEventListener('dragend',endDrag);
+      box.append(button);
     }
-    input.value = item.value;
-    initial = item.value;
-    input.onchange = () => markChanged(item.key);
-    control.append(input);
-    SETTING_INPUTS.set(item.key, { read: () => input.value, changed: () => input.value !== initial });
-  } else if (item.kind === "secret") {
-    input = el("input", "cell");
-    input.type = "password";
-    input.autocomplete = "new-password";
-    input.placeholder = item.is_set ? "set. type to replace" : "not set";
-    input.oninput = () => markChanged(item.key);
-    const clear = actionButton("Clear", "Remove the saved value", () => {
-      input.value = "";
-      SETTING_INPUTS.get(item.key).clear = true;
-      input.placeholder = "will be cleared on save";
-      markChanged(item.key);
-    });
-    control.append(input, clear);
-    SETTING_INPUTS.set(item.key, {
-      read: () => (SETTING_INPUTS.get(item.key).clear ? "" : input.value),
-      changed: () => SETTING_INPUTS.get(item.key).clear || input.value !== "",
-    });
-  } else {
-    input = el("input", "cell");
-    input.type = item.kind === "int" ? "number" : "text";
-    input.value = item.value;
-    initial = String(item.value);
-    input.oninput = () => markChanged(item.key);
-    control.append(input);
-    SETTING_INPUTS.set(item.key, { read: () => input.value, changed: () => input.value !== initial });
   }
-  input.disabled = item.locked;
-  for (const btn of control.querySelectorAll("button")) btn.disabled = item.locked;
-  row.append(control);
-  return row;
+  const custom=el('button',{class:'palette-block',onclick:action(()=>addCustom()),draggable:'false','data-directive':'custom_directive'},'Custom code',el('span',{text:'＋'}));decorate(custom,'Custom');
+  custom.addEventListener('dragstart',event=>{const data={template:{name:'custom_directive',args:['value'],kind:'directive'}};event.dataTransfer.setData('application/json',JSON.stringify(data));startDrag(data);});custom.addEventListener('dragend',endDrag);box.append(custom);
 }
-
-function markChanged(key) {
-  const entry = SETTING_INPUTS.get(key);
-  entry.dirtyFlag = true;
+function selectedParent(){const hit=state.selected&&locate(state.selected);return hit?(hit.node.kind==='block'?hit.node.id:hit.parent):null;}
+function contextsFor(parent){return parent?[locate(parent).node.name]:(state.scopeInfo?.[state.file]||[state.doc.context]);}
+function allowed(node,context){if(node.kind==='comment'||state.tableContexts.has(context))return true;if(!['main','http','stream','mail','server','location','upstream','if','limit_except','events'].includes(context))return true;if(node.name==='server'&&node.kind==='directive')return context==='upstream';const rule=state.rules[node.name];return !rule||(node.kind===rule.kind&&(rule.contexts.includes('any')||rule.contexts.includes(context)));}
+function canPlace(node,parent){return contextsFor(parent).every(c=>allowed(node,c))&&node.children.every(child=>validSubtree(child,node.name));}
+function validSubtree(node,context){return allowed(node,context)&&node.children.every(child=>validSubtree(child,node.name));}
+function placementMessage(node,parent){const rule=state.rules[node.name];return `${node.name} cannot snap into ${contextsFor(parent).join(' / ')}. ${rule?'Use '+rule.contexts.join(' or ')+'.':'Check the child blocks.'}`;}
+function startDrag(data){
+  state.dragData=data;document.body.classList.add('dragging');
+  const node=data.template?{...data.template,children:[]}:locate(data.nodeId)?.node;
+  $$('.drop-zone').forEach(zone=>{const parent=zone.dataset.parent||null;const cycle=data.nodeId&&(parent===data.nodeId||(parent&&flatten(node.children).some(n=>n.node.id===parent)));const valid=data.recipe?data.recipe.parsedNodes.every(n=>canPlace(n,parent)):node&&!cycle&&canPlace(node,parent);zone.classList.toggle('snap-valid',valid);zone.classList.toggle('snap-invalid',!valid);zone.textContent=valid?'Snap into '+contextsFor(parent).join(' / '):'';});
 }
+function endDrag(){state.dragData=null;document.body.classList.remove('dragging');$$('.drop-zone').forEach(zone=>{zone.classList.remove('snap-valid','snap-invalid','drag-over');zone.textContent=zone.classList.contains('empty')?'Drop blocks here':'';});$$('.receiving').forEach(node=>node.classList.remove('receiving'));}
+async function selectNode(id){if(!await applyArgument()||!await applyInspector())return;state.selected=id;$$('.node.selected').forEach(n=>n.classList.remove('selected'));$(`[data-node="${CSS.escape(id)}"]`)?.classList.add('selected');renderInspector();renderPalette();$('#canvasHint').textContent='New blocks snap into '+contextsFor(selectedParent()).join(' / ');showRight('inspector');}
+async function addTemplate(template,parent=undefined,index=null) {
+  if(!await applyDraft())return;
+  if(parent===undefined && state.selected) { const hit=locate(state.selected); parent=hit.node.kind==='block'?hit.node.id:hit.parent; }
+  const nodes=parent?locate(parent).node.children:currentFile().nodes;
+  const node=newNode(template.name,clone(template.args),template.kind);
+  if(!canPlace(node,parent||null))throw new Error(placementMessage(node,parent||null));
+  mutate(()=>{nodes.splice(index??nodes.length,0,node);state.selected=node.id;},`Added ${node.name}`);
+}
+async function addCustom() { await addTemplate({name:'custom_directive',args:['value'],kind:'directive'});showRight('inspector'); }
 
-function renderSettings(data) {
-  SETTING_INPUTS.clear();
-  const groups = $("settingsGroups");
-  groups.textContent = "";
-  const byGroup = new Map();
-  for (const item of data.settings) {
-    if (!byGroup.has(item.group)) byGroup.set(item.group, []);
-    byGroup.get(item.group).push(item);
+function dropZone(parent,index,empty=false) {
+  const zone=el('div',{class:'drop-zone'+(empty?' empty':''),'data-parent':parent||'','data-index':index,role:'presentation'},empty?'Drop blocks here':null);
+  zone.addEventListener('dragover',event=>{event.stopPropagation();if(zone.classList.contains('snap-invalid')){event.dataTransfer.dropEffect='none';return;}event.preventDefault();zone.classList.add('drag-over');if(parent)$(`[data-node="${CSS.escape(parent)}"] > .node-card`)?.classList.add('receiving');});
+  zone.addEventListener('dragleave',()=>{zone.classList.remove('drag-over');$$('.receiving').forEach(n=>n.classList.remove('receiving'));});
+  zone.addEventListener('drop',action(async event=>{
+    event.preventDefault();event.stopPropagation();endDrag();
+    const raw=event.dataTransfer.getData('application/json');if(!raw)return;
+    const data=JSON.parse(raw);
+    if(data.template)return addTemplate(data.template,parent,index);
+    const hit=locate(data.nodeId);if(!hit)return;
+    if(parent===hit.node.id || (parent&&flatten(hit.node.children).some(n=>n.node.id===parent)))throw new Error('A block cannot be moved inside itself.');
+    if(!canPlace(hit.node,parent))throw new Error(placementMessage(hit.node,parent));
+    const target=parent?locate(parent).node.children:currentFile().nodes;
+    let position=index;
+    if(target===hit.nodes&&hit.index<position)position--;
+    mutate(()=>{hit.nodes.splice(hit.index,1);target.splice(position,0,hit.node);state.selected=hit.node.id;},'Block moved');
+  }));
+  return zone;
+}
+function blockList(nodes,parent=null) {
+  const container=el('div',{class:'node-list'});
+  if(!nodes.length) {container.append(dropZone(parent,0,true));return container;}
+  for(let index=0;index<nodes.length;){container.append(dropZone(parent,index));const group=visualGroup(nodes,index,parent);if(group){container.append(groupElement(group,parent));index+=group.nodes.length;}else{container.append(nodeElement(nodes[index]));index++;}}
+  container.append(dropZone(parent,nodes.length));return container;
+}
+function nodeElement(node) {
+  const group=groupFor(node),custom=!state.known.has(node.name)&&node.kind!=='comment';
+  const wrapper=el('article',{class:`node node-${node.kind}${state.selected===node.id?' selected':''}`,'data-node':node.id});decorate(wrapper,group);
+  const head=el('div',{class:'node-head',draggable:'false',onclick:action(async event=>{event.stopPropagation();await selectNode(node.id);})});
+  head.append(el('span',{class:'node-grip','aria-hidden':'true',text:'⠿'}));
+  if(node.kind==='comment')head.append(el('span',{class:'node-args',text:node.text}));
+  else {
+    head.append(el('span',{class:'node-name',text:node.name}));
+    const args=el('span',{class:'node-args'},node.args.map((arg,index)=>argumentControl(node,index,arg)));
+    if(!['server','http','stream','mail','events'].includes(node.name))args.append(el('button',{class:'argument-add',title:'Add an argument','aria-label':`Add argument to ${node.name}`,onclick:action(async event=>{event.stopPropagation();if(!await applyDraft())return;mutate(()=>{locate(node.id).node.args.push('""');state.selected=node.id;});}),text:'+'}));
+    head.append(args);if(custom)head.append(el('span',{class:'node-badge',text:'CUSTOM'}));else if(node.kind==='block')head.append(el('span',{class:'node-badge',text:'SCOPE'}));
   }
-  for (const [group, items] of byGroup) {
-    const section = el("section", "setting-group");
-    section.append(el("h3", "sub", group));
-    for (const item of items) section.append(settingRow(item));
-    groups.append(section);
+  head.append(inlineActions(node));
+  head.addEventListener('dragstart',event=>{if(event.target.tagName==='INPUT'||event.target.tagName==='SELECT'){event.preventDefault();return;}event.stopPropagation();event.dataTransfer.setData('application/json',JSON.stringify({nodeId:node.id}));event.dataTransfer.effectAllowed='move';startDrag({nodeId:node.id});});
+  head.addEventListener('dragend',endDrag);
+  const card=el('div',{class:'node-card'},head);
+  if(node.name==='include'&&node.kind==='directive'){const info=el('div',{class:'include-info','data-include':node.id});renderIncludeInfo(info,node);card.append(info);}
+  if(node.kind==='block')card.append(el('div',{class:'node-children'},blockList(node.children,node.id)));
+  wrapper.append(card);return wrapper;
+}
+function argumentControl(node,index,arg){
+  const boolean=arg==='on'||arg==='off';
+  const attrs={class:'argument argument-input',value:arg,'aria-label':`${node.name} argument ${index+1}`,title:'Edit directly. Keep Nginx quotes, or type a value; spaces will be quoted.',draggable:'false'};
+  const input=boolean?el('select',attrs,['on','off'].map(value=>el('option',{value,text:value}))):el('input',attrs);
+  input.value=arg;
+  if(!boolean)input.style.width=Math.max(4,Math.min(arg.length+2,55))+'ch';
+  input.addEventListener('click',event=>event.stopPropagation());
+  input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();input.blur();}if(event.key==='Escape'){input.value=arg;input.blur();}});
+  input.addEventListener('input',()=>{state.argumentDraft={id:node.id,index,value:input.value};$('#changeStatus').textContent='Editing block value';});
+  const commit=()=>{if(input.value!==arg&&!state.argumentDraft)state.argumentDraft={id:node.id,index,value:input.value};applyArgument();};
+  input.addEventListener('change',commit);input.addEventListener('blur',commit);
+  return el('span',{class:'argument-slot'},input,el('button',{class:'argument-remove',title:'Remove this argument','aria-label':`Remove ${node.name} argument ${index+1}`,onclick:action(async event=>{event.stopPropagation();if(!await applyDraft())return;mutate(()=>{locate(node.id).node.args.splice(index,1);},'Argument removed');}),text:'×'}));
+}
+function applyArgument(){
+  if(state.argumentPending)return state.argumentPending;
+  const draft=state.argumentDraft;if(!draft)return Promise.resolve(true);
+  state.argumentPending=(async()=>{
+    try{const hit=locate(draft.id);if(!hit){state.argumentDraft=null;return true;}let token=draft.value||'""';if(!/^["']/.test(token)&&/[\s;{}]/.test(token))token=JSON.stringify(token);const candidate=clone(hit.node);candidate.args[draft.index]=token;await api('/api/document',{document:{...state.doc,files:[{path:'argument-check.conf',nodes:[candidate]}],entrypoint:'argument-check.conf'}});state.argumentDraft=null;mutate(()=>{locate(draft.id).node.args[draft.index]=token;state.selected=draft.id;},'Argument updated');return true;}catch(error){state.argumentDraft=null;toast(error.message);render();return false;}
+  })();
+  return state.argumentPending.finally(()=>{state.argumentPending=null;});
+}
+function renderCanvas() {
+  const canvas=$('#canvas');canvas.replaceChildren();
+  if(state.mode==='blocks') {
+    canvas.append(el('div',{class:'scope-label',text:`${state.doc.context.toUpperCase()} / ${state.file}`}));
+    canvas.append(blockList(currentFile().nodes));
+    canvas.append(el('button',{class:'add-custom',onclick:action(()=>addTemplate({name:'custom_directive',args:['value'],kind:'directive'},null)),text:'＋ Add a custom directive to this scope'}));
+    $('#canvasHint').textContent='Edit values on the blocks · drag the grip to a valid snap target';
+  } else if(state.mode==='basic') {renderBasicV2(canvas);$('#canvasHint').textContent='Simple controls + Advanced code · apply or change views to keep edits';}
+  else {
+    const json=state.mode==='json';
+    const wrap=el('div',{class:'raw-wrap'},el('div',{class:'raw-heading'},el('h3',{text:json?'Stored document · read only':'Custom Nginx source'}),json?null:el('button',{class:'primary',id:'applySourceBtn',onclick:action(async()=>{await applyDraft();}),text:'Apply changes'})));
+    const textarea=el('textarea',{id:'sourceEditor',class:'raw-editor',spellcheck:'false','aria-label':json?'Document JSON':'Nginx configuration',value:json?JSON.stringify(state.doc,null,2):renderNodes(currentFile().nodes)});
+    textarea.readOnly=json;
+    textarea.addEventListener('input',()=>{state.rawDirty=true;$('#changeStatus').textContent='Unapplied source changes';scheduleAutoCheck();});
+    textarea.addEventListener('keydown',event=>{if(!json&&event.key==='Tab'){event.preventDefault();textarea.setRangeText('    ',textarea.selectionStart,textarea.selectionEnd,'end');state.rawDirty=true;}});
+    wrap.append(textarea,el('p',{class:'raw-notice',text:json?'Internal storage format, shown for inspection. Make changes in Basic, Blocks, or Nginx.':'Apply parses this file into blocks. Unsupported directives remain editable in their original scope. Whitespace is formatted on export.'}));canvas.append(wrap);
+    $('#canvasHint').textContent='Source changes are parsed before changing views';
   }
 }
-
-async function openSettings() {
-  const data = await api("GET", "/api/settings");
-  renderSettings(data);
-  $("dlgSettings").showModal();
+async function applyDraft() {
+  if(!await applyArgument())return false;
+  if(!await applyCustomDraft())return false;
+  if(!await applyBasicDraft())return false;
+  if(!await applyInspector())return false;
+  if(!state.rawDirty)return true;
+  const source=$('#sourceEditor').value;
+  try {
+    if(state.mode==='json') {const doc=await api('/api/document',{document:JSON.parse(source)});snapshot();state.doc=doc;state.doc.revision=state.revision;}
+    else {const {nodes}=await api('/api/parse',{text:source,path:state.file});snapshot();currentFile().nodes=nodes;}
+    state.selected=null;changed('Source applied');return true;
+  } catch(error) {toast(error.message);return false;}
 }
 
-async function saveSettings() {
-  const values = {};
-  for (const [key, entry] of SETTING_INPUTS) {
-    if (entry.changed()) values[key] = entry.read();
+function renderInspector() {
+  const box=$('#inspector');box.replaceChildren();
+  const hit=state.selected&&locate(state.selected);
+  if(!hit) {
+    box.append(el('div',{class:'empty-inspector'},el('div',{class:'empty-icon',text:'⌖'}),el('h3',{text:'Every directive has a place.'}),el('p',{class:'hint',text:'Select a block to edit its Nginx source, move it, or add children. Unknown directives stay visible as custom blocks.'}),el('div',{class:'metadata-list'},el('div',{},'Current file ',el('span',{text:state.file})),el('div',{},'Entry context ',el('span',{text:state.doc.context})),el('div',{},'Deployment intent ',el('span',{text:state.doc.enabled?'enabled':'disabled'}))),el('hr',{class:'inspector-divider'}),el('p',{class:'hint',text:'Need a starting point? Add a server block, then add listen, server_name and a location inside it.'})));return;
   }
-  if (!Object.keys(values).length) return log("Nothing changed in Settings.");
-  const data = await api("PUT", "/api/settings", { values });
-  renderSettings(data);
-  const status = await api("GET", "/api/config");
-  S.config = status;
-  setBadges(status);
-  log(`Saved ${Object.keys(values).length} setting(s).`);
+  const node=hit.node,custom=!state.known.has(node.name)&&node.kind!=='comment';
+  box.append(el('div',{class:'selection-type',text:node.kind==='comment'?'Comment':custom?'Custom directive':node.kind==='block'?'Configuration block':'Nginx directive'}),el('h2',{class:'inspector-title',text:node.name||'comment'}),el('span',{class:'type-tag',text:custom?'PRESERVED AS CUSTOM':groupFor(node).toUpperCase()}));
+  box.append(el('p',{class:'hint',text:custom?'This directive is outside the starter palette. Its arguments and scope are preserved; edit it directly below.':'Edit the source for this selection. Use Nginx quoting for spaces, empty values, and regular expressions.'}));
+  if(state.hints[node.name])box.append(el('p',{class:'block-explanation',text:state.hints[node.name]}));
+  if(node.name==='include'){const info=el('div',{class:'include-info','data-include':node.id});renderIncludeInfo(info,node);box.append(info);}
+  if(node.name==='listen'&&node.args.includes('http2'))box.append(el('button',{class:'full-button',onclick:action(async()=>{let server=hit;while(server&&server.node.name!=='server')server=server.parent?locate(server.parent):null;if(!server)throw new Error('No parent HTTP server found.');const doc=await api('/api/modernize-http2',{document:state.doc,node_id:server.node.id});mutate(()=>{state.doc=doc;},'Converted legacy listen http2');}),text:'Convert to http2 on; ↗'}));
+  const source=el('textarea',{id:'nodeSource',class:'inspector-source',rows:node.kind==='block'?11:5,spellcheck:'false',value:state.inspectorDraft?.id===node.id?state.inspectorDraft.text:renderNodes([node]).trimEnd(),'aria-label':'Selected block source'});
+  source.addEventListener('input',()=>{state.inspectorDraft={id:node.id,text:source.value};$('#changeStatus').textContent='Unapplied block changes';scheduleAutoCheck();});
+  box.append(el('label',{},'BLOCK SOURCE',source));
+  box.append(el('button',{class:'primary full-button',onclick:action(async()=>{state.inspectorDraft={id:node.id,text:source.value};await applyInspector();}),text:'Apply block changes'}));
+  box.append(el('div',{class:'node-actions'},el('button',{title:'Move up',disabled:hit.index===0,onclick:()=>mutate(()=>{hit.nodes.splice(hit.index-1,0,hit.nodes.splice(hit.index,1)[0]);}),text:'↑ Up'}),el('button',{title:'Move down',disabled:hit.index===hit.nodes.length-1,onclick:()=>mutate(()=>{hit.nodes.splice(hit.index+1,0,hit.nodes.splice(hit.index,1)[0]);}),text:'↓ Down'}),el('button',{onclick:()=>mutate(()=>{const copy=clone(node);reidentify(copy);hit.nodes.splice(hit.index+1,0,copy);state.selected=copy.id;},'Block duplicated'),text:'Duplicate'})));
+  if(node.kind==='block')box.append(el('button',{class:'full-button',onclick:action(addCustom),text:'＋ Add custom child'}));
+  box.append(el('hr',{class:'inspector-divider'}),el('div',{class:'metadata-list'},el('div',{},'Scope ',el('span',{text:hit.parent?locate(hit.parent).node.name:state.doc.context})),el('div',{},'Source ',el('span',{text:hit.file.path+(node.line?`:${node.line}`:'')}))),el('button',{class:'danger full-button',onclick:()=>mutate(()=>{hit.nodes.splice(hit.index,1);state.selected=null;},'Block removed'),text:node.kind==='block'?'Delete block and children':'Delete directive'}));
+}
+async function applyInspector(){
+  const draft=state.inspectorDraft;if(!draft)return true;
+  try{const hit=locate(draft.id);if(!hit){state.inspectorDraft=null;return true;}const {nodes}=await api('/api/parse',{text:draft.text,path:hit.file.path});if(!nodes.length)throw new Error('Use Delete to remove this block.');for(const node of nodes)if(!canPlace(node,hit.parent))throw new Error(placementMessage(node,hit.parent));if(nodes.length===1)nodes[0].id=draft.id;state.inspectorDraft=null;mutate(()=>{hit.nodes.splice(hit.index,1,...nodes);state.selected=nodes[0].id;},'Block updated');return true;}catch(error){toast(error.message);return false;}
+}
+function reidentify(node) {node.id=uid();node.line=null;node.children.forEach(reidentify);}
+
+function renderSettings() {
+  const box=$('#settings');box.replaceChildren();
+  const enabled=el('input',{type:'checkbox',checked:state.doc.enabled,onchange:()=>mutate(()=>{state.doc.enabled=enabled.checked;})});
+  box.append(el('div',{class:'selection-type',text:'Document metadata'}),el('h3',{text:'Delivery intent'}),el('label',{class:'check-label'},enabled,el('span',{text:'Enabled on target hosts'})),el('p',{class:'hint',text:'Disabled configurations are still generated, exported and validated. This flag records deployment intent for future host integration.'}));
+  const context=el('select',{'aria-label':'Initial context'},['main','http','stream','mail','server','location'].map(c=>el('option',{value:c,text:c})));context.value=state.doc.context;
+  const entry=el('select',{'aria-label':'Entrypoint'},state.doc.files.map(f=>el('option',{value:f.path,text:f.path})));entry.value=state.doc.entrypoint;
+  const prefix=el('input',{value:state.doc.prefix,'aria-label':'Nginx configuration prefix'});
+  box.append(el('hr',{class:'inspector-divider'}),el('label',{},'Initial Nginx context',context),el('label',{},'Entrypoint file',entry),el('label',{},'Nginx config prefix',prefix),el('button',{class:'full-button',onclick:action(async()=>{
+    const candidate=clone(state.doc);candidate.context=context.value;candidate.entrypoint=entry.value;candidate.prefix=prefix.value;await api('/api/document',{document:candidate});mutate(()=>{state.doc=candidate;},'Document settings updated');
+  }),text:'Apply document settings'}),el('div',{class:'settings-warning',text:'The prefix resolves relative include paths. Upload included files to resolve them. Missing includes block effective exports and nginx -t.'}),el('p',{class:'hint',text:'Export preserves file paths and include directives. It writes a separate output bundle; deployment and reload are outside this demo.'}));
 }
 
-async function testNotify() {
-  const data = await api("POST", "/api/notify/test");
-  for (const [channel, outcome] of Object.entries(data.results)) log(`Test ${channel}: ${outcome}`);
+let previewTimer;
+function schedulePreview() {clearTimeout(previewTimer);const version=++state.renderVersion;previewTimer=setTimeout(async()=>{try{const data=await api('/api/render',{document:state.doc});if(version!==state.renderVersion)return;const graphChanged=JSON.stringify(state.includeLinks)!==JSON.stringify(data.includes||{});state.rendered=data;state.scopeInfo=data.file_contexts;state.includeLinks=data.includes||{};if(graphChanged&&state.mode==='basic'&&!state.basicDirty&&!$('#canvas').contains(document.activeElement))renderCanvas();renderPalette();renderPreview();refreshIncludeInfo();$('#contextLabel').textContent=contextsFor(null).join(' / ').toUpperCase()+' CONTEXT';}catch(error){if(version===state.renderVersion)toast(error.message);}},120);}
+function renderPreview() {if(!state.rendered)return;const effective=$('#previewType').value==='effective';$('#codePreview').textContent=effective?state.rendered.effective:state.rendered.files[state.file];$('#includeWarning').textContent=effective&&state.rendered.include_issues.length?'Incomplete effective view: '+state.rendered.include_issues.map(i=>i.message).join('; '):effective?'Includes expanded in place. File boundaries remain in the document.':'Generated directly from this file’s ordered blocks.';}
+function showRight(which) {$$('.right-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.right===which));['inspector','preview','settings'].forEach(id=>$('#'+id).classList.toggle('hidden',id!==which));if(which==='preview')renderPreview();}
+function undo(redo=false) {if(state.rawDirty||state.inspectorDraft){toast('Apply source changes before using history.');return;}const from=redo?state.future:state.history,to=redo?state.history:state.future;if(!from.length)return;to.push(clone(state.doc));state.doc=from.pop();state.doc.revision=state.revision;state.selected=null;changed(redo?'Redone':'Undone');}
+
+async function saveDraft() {if(!await applyDraft())return;state.doc.revision=state.revision;const saved=await api('/api/library',{document:state.doc});state.doc=saved;state.revision=saved.revision;state.dirty=false;remember();render();toast(`Saved revision ${saved.revision}`);}
+async function refreshLibrary() {const items=await api('/api/library');$('#libraryCount').textContent=items.length;const box=$('#libraryList');box.replaceChildren();if(!items.length)box.append(el('p',{class:'library-empty',text:'Your saved configurations will appear here.'}));for(const item of items)box.append(el('div',{class:'library-item'},el('div',{},el('strong',{text:item.name}),el('small',{text:`${item.files} files · revision ${item.revision} · ${item.enabled?'enabled':'disabled'}`})),el('button',{onclick:action(async()=>{if(!await allowReplace())return;setDocument(await api('/api/library/'+item.id));$('#libraryDialog').close();toast('Configuration loaded');}),text:'Open'})));}
+function result(title,eyebrow,children) {$('#resultTitle').textContent=title;$('#resultEyebrow').textContent=eyebrow;$('#resultBody').replaceChildren(...children);$('#resultDialog').showModal();}
+async function runValidation() {
+  if(!await applyDraft())return;
+  const button=$('#validateBtn');button.disabled=true;button.textContent='Checking…';
+  try {
+    const report=await api('/api/validate',{document:state.doc,nginx:true});
+    const passed=report.nginx.status==='passed',structural=report.structural_ok;
+    $('#validationStatus').textContent=passed?'nginx -t passed':structural?'Structural checks passed · host check '+report.nginx.status:'Configuration needs attention';
+    const contents=[el('div',{class:'result-pill'+(passed?'':' warn'),text:passed?'NGINX VALIDATED':structural?'STRUCTURE CHECKED':'CHECKS NEED ATTENTION'}),el('p',{class:'result-message',text:`Document structure: ${structural?'passed':'issues found'}\nNginx test: ${report.nginx.status}`}),el('pre',{class:'result-code',text:report.nginx.message})];
+    for(const issue of report.issues)contents.push(el('p',{class:'form-error',text:`${issue.path||''}: ${issue.message}`}));
+    contents.push(el('p',{class:'hint',text:'Certificate paths, installed modules, and inherited settings must also be checked on the intended host.'}));
+    result('Validation report','CHECK BEFORE DELIVERY',contents);
+  } finally {button.disabled=false;button.textContent='✓ Validate';}
+}
+async function exportFiles(flatten=false) {
+  if(!await applyDraft())return;
+  const output=await api('/api/export',{document:state.doc,flatten});
+  const link=el('a',{href:output.download,download:'nginx-configuration.zip',text:'Download configuration ZIP ↗'});link.className='download-link';
+  result('Configuration exported','WRITTEN TO A SEPARATE BUNDLE',[el('p',{class:'result-message',text:`${output.files.length} Nginx files written. Enabled metadata: ${state.doc.enabled}.`}),el('pre',{class:'result-code',text:output.directory}),link,el('p',{class:'hint',text:'The ZIP includes the versioned JSON document. Original include paths are preserved; place files at their intended paths when deploying.'}),el('button',{class:'full-button',onclick:action(async()=>{$('#resultDialog').close();await exportFiles(true);}),text:'Export a flattened effective.conf instead'})]);
+  toast('Export written');
 }
 
-// ---------------------------------------------------------------- certificates
+$('#documentName').addEventListener('change',action(async()=>{const name=$('#documentName').value.trim();if(!name){$('#documentName').value=documentTitle(state.doc.name);return;}if(!await applyDraft())return;mutate(()=>{state.doc.name=name;});}));
+$('#paletteSearch').addEventListener('input',renderPalette);
+$$('.mode-tabs button').forEach(button=>button.addEventListener('click',action(()=>setMode(button.dataset.mode,true))));
+$$('.right-tabs button').forEach(button=>button.addEventListener('click',()=>showRight(button.dataset.right)));
+$$('[data-close]').forEach(button=>button.addEventListener('click',()=>$('#'+button.dataset.close).close()));
+$('#undoBtn').addEventListener('click',()=>undo());$('#redoBtn').addEventListener('click',()=>undo(true));
+$('#saveBtn').addEventListener('click',action(()=>applyWorkspace()));$('#validateBtn').addEventListener('click',action(runValidation));
+$('#previewType').addEventListener('change',renderPreview);$('#copyBtn').addEventListener('click',action(async()=>{await navigator.clipboard.writeText($('#codePreview').textContent);toast('Copied generated config');}));
 
-async function openCerts() {
-  const data = await api("GET", "/api/certs");
-  $("certStaging").checked = data.staging;
-  $("certList").textContent = data.output || "No certificates yet.";
-  $("dlgCerts").showModal();
-}
 
-async function issueCert() {
-  const domains = $("certDomains").value;
-  if (!domains.trim()) return log("Enter at least one domain.");
-  log("Requesting a certificate. DNS-01 can take a few minutes...");
-  const data = await api("POST", "/api/certs/issue", { domains, staging: $("certStaging").checked });
-  log((data.ok ? "Certificate issued" : "Certificate request failed") + (data.staging ? " (staging)." : "."));
-  log(data.output);
-  if (data.dns) {
-    if (data.dns.error) log("DNS: " + data.dns.error);
-    else for (const [domain, outcome] of Object.entries(data.dns.results)) log(`DNS ${domain}: ${outcome}`);
-  }
-  const list = await api("GET", "/api/certs");
-  $("certList").textContent = list.output || "No certificates yet.";
-}
+$('#newBtn').addEventListener('click',action(async()=>{
+  if(!await allowReplace())return;
+  setDocument(await api('/api/workspace'));toast('Reloaded from disk');
+}));
+document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){event.preventDefault();action(applyWorkspace)();}if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){event.preventDefault();undo(event.shiftKey);}});
+window.addEventListener('beforeunload',event=>{if(state.dirty||state.rawDirty||state.inspectorDraft||state.argumentDraft||state.customDraft||state.basicDirty){event.preventDefault();event.returnValue='';}});
+$('#checkDetails').addEventListener('click',showCheckDetails);
+installPointerDragging();
 
-// ---------------------------------------------------------------- startup
-
-function setBadges(config) {
-  const authBadge = $("authBadge");
-  authBadge.textContent = config.auth ? "login on" : "login off";
-  authBadge.classList.toggle("on", config.auth);
-  const reloadBadge = $("reloadBadge");
-  reloadBadge.textContent = config.auto_reload ? "auto-reload on" : "auto-reload off";
-  reloadBadge.classList.toggle("on", config.auto_reload);
-  $("btnDns").hidden = !config.cloudflare;
-}
-
-function bindEvents() {
-  $("btnSave").onclick = () => save().catch(report);
-  $("btnNewFile").onclick = () => newFile().catch(report);
-  $("btnDelete").onclick = () => removeFile().catch(report);
-  $("btnHistory").onclick = () => openHistory().catch(report);
-  $("btnTest").onclick = () => testConfig().catch(report);
-  $("btnReload").onclick = () => reloadNginx().catch(report);
-  $("btnDns").onclick = () => openDns().catch(report);
-  $("btnSettings").onclick = () => openSettings().catch(report);
-  $("btnSaveSettings").onclick = () => saveSettings().catch(report);
-  $("btnTestNotify").onclick = () => testNotify().catch(report);
-  $("btnCerts").onclick = () => openCerts().catch(report);
-  $("btnIssue").onclick = () => issueCert().catch(report);
-  $("btnClearLog").onclick = () => { $("output").textContent = ""; };
-  for (const btn of document.querySelectorAll(".close-dialog")) {
-    btn.onclick = () => btn.closest("dialog").close();
-  }
-  $("modeRaw").onclick = () => setMode("raw").catch(report);
-  $("modeBlocks").onclick = () => setMode("blocks").catch(report);
-  $("editor").addEventListener("input", () => {
-    S.content = $("editor").value;
-    markDirty();
-  });
-  $("btnSaveDomains").onclick = async () => {
-    const data = await api("POST", "/api/dns/domains", { domains: $("dnsDomains").value });
-    log(`Saved ${data.domains.length} DNS domain(s).`);
-    $("dnsDomains").value = data.domains.join("\n");
-  };
-  $("btnSyncDns").onclick = async () => {
-    const data = await api("POST", "/api/dns/sync");
-    if (data.error) return log("DNS: " + data.error);
-    log(`DNS sync at ${data.last_run} (public IP ${data.ip}).`);
-    for (const [domain, outcome] of Object.entries(data.results)) log(`  ${domain}: ${outcome}`);
-    $("dlgDns").close();
-  };
-  document.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      save().catch(report);
-    }
-  });
-  window.addEventListener("beforeunload", (e) => {
-    if (S.dirty) e.preventDefault();
-  });
-}
-
-async function start() {
-  bindEvents();
-  S.config = await api("GET", "/api/config");
-  setBadges(S.config);
-  await loadDir("");
-  log(`Editing ${S.config.root}. Pick a file to begin.`);
-}
-
-start().catch(report);
+(async()=>{
+  try {
+    // files.js (remembered views and last file) runs after this script; wait for it and the saved preferences.
+    while(typeof prefsReady==='undefined')await new Promise(done=>setTimeout(done,20));
+    await prefsReady;
+    const settings=await api('/api/palette');state.palette=settings.palette;state.known=new Set(settings.known);state.rules=settings.rules||{};state.tableContexts=new Set(settings.table_contexts||[]);state.recipes=settings.recipes||[];state.hints=settings.hints||{};
+    let restored=false;
+    try {const draft=JSON.parse(null);if(draft?.document){setDocument(await api('/api/document',{document:draft.document}),draft.dirty);restored=true;}}catch{/* Start with the example if a browser draft is invalid. */}
+    if(!restored)setDocument(await api('/api/workspace'));
+    
+  }catch(error){$('#canvas').replaceChildren(el('div',{class:'error-banner',text:'Could not connect to the local document engine: '+error.message}));}
+})();

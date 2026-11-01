@@ -2,10 +2,10 @@
 
 Follows the approach of obsoletelabs/cloudflare_updater: paginated zone lookup,
 retries with backoff on 429 and 5xx, a public-IP check with fallbacks, and
-A-record create or update. Standard library only.
+A-record create or update, and moving every record from an old IP to a new one.
+Standard library only.
 """
 
-import ipaddress
 import json
 import logging
 import time
@@ -14,30 +14,12 @@ import urllib.parse
 import urllib.request
 
 API = "https://api.cloudflare.com/client/v4"
-IP_URLS = ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]
 
 log = logging.getLogger("nginx-autohandler.cloudflare")
 
 
 class CloudflareError(RuntimeError):
     pass
-
-
-def public_ip():
-    """This host's public IPv4 address, from the first URL that answers."""
-    last_error = None
-    for url in IP_URLS:
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                ip = resp.read().decode("utf-8").strip()
-            address = ipaddress.IPv4Address(ip)
-            if address.is_unspecified or address.is_private:
-                raise ValueError(f"{url} returned a non-public address: {ip}")
-            return str(address)
-        except (OSError, ValueError) as exc:
-            last_error = exc
-            log.warning("public IP lookup via %s failed: %s", url, exc)
-    raise CloudflareError(f"could not detect public IP: {last_error}")
 
 
 class Cloudflare:
@@ -105,6 +87,57 @@ class Cloudflare:
                 return zone_id
         raise CloudflareError(f"no zone for {hostname} is visible to this token")
 
+    def verify(self):
+        """Is the token valid and active? Returns (ok, message)."""
+        try:
+            data = self.request("GET", "/user/tokens/verify", retries=2)
+        except CloudflareError as exc:
+            return False, str(exc)
+        status = (data.get("result") or {}).get("status")
+        return status == "active", f"token status: {status}"
+
+    def a_records(self, zone_id):
+        """Every A record in a zone, across pages."""
+        records, page = [], 1
+        while True:
+            data = self.request("GET", f"/zones/{zone_id}/dns_records",
+                                params={"type": "A", "page": page, "per_page": 100})
+            records.extend(data["result"])
+            if page >= data["result_info"]["total_pages"]:
+                return records
+            page += 1
+
+    def replace_ip(self, old_ip, new_ip):
+        """Point every A record that holds `old_ip` at `new_ip`, in every zone the token can see.
+
+        Only records with the old address change, so several hosts can share a domain.
+        TTL and the proxy flag of each record are kept. Returns {name: "updated" | "error: ..."}.
+        """
+        if not new_ip or new_ip == "0.0.0.0":
+            raise CloudflareError("refusing to point records at 0.0.0.0")
+        self._zones = None  # zones may have been added since the last look
+        results = {}
+        for zone_name, zone_id in sorted(self.zones().items()):
+            try:
+                records = self.a_records(zone_id)
+            except CloudflareError as exc:
+                log.warning("skipping zone %s: %s", zone_name, exc)
+                results[f"zone {zone_name}"] = f"error: {exc}"
+                continue
+            for record in records:
+                if record["content"] != old_ip:
+                    continue
+                ttl = record.get("ttl", 1)
+                body = {"type": "A", "name": record["name"].strip(), "content": new_ip,
+                        "ttl": ttl if ttl >= 120 else 1, "proxied": bool(record.get("proxied"))}
+                try:
+                    self.request("PUT", f"/zones/{zone_id}/dns_records/{record['id']}", body=body)
+                    results[record["name"]] = "updated"
+                    log.info("[%s] %s: %s -> %s", zone_name, record["name"], old_ip, new_ip)
+                except CloudflareError as exc:
+                    results[record["name"]] = f"error: {exc}"
+        return results
+
     def set_a(self, hostname, ip):
         """Make `hostname` an A record pointing at `ip`. Returns created, updated or unchanged."""
         zone_id = self.zone_id_for(hostname)
@@ -118,6 +151,8 @@ class Cloudflare:
         record = records[0]
         if record["content"] == ip and record["proxied"] == self.proxied:
             return "unchanged"
+        if record.get("ttl", 1) >= 120:
+            body["ttl"] = record["ttl"]  # keep a TTL somebody set on purpose
         self.request("PATCH", f"/zones/{zone_id}/dns_records/{record['id']}", body=body)
         return "updated"
 
