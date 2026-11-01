@@ -1,7 +1,7 @@
 services:
-  nginx-ui:
+  nginx-autohandler:
     build: .
-    image: nginx-ui:local
+    image: nginx-autohandler:local
     restart: unless-stopped
     # The default bridge avoids creating a new Docker network, which fails when address pools are full.
     network_mode: bridge
@@ -11,7 +11,7 @@ services:
       - "8080:8080"   # editor UI, bound to all interfaces; put your TLS reverse proxy in front
     environment:
       NGINX_AUTO_RELOAD: ${NGINX_AUTO_RELOAD:-true}
-      NGINX_UI_BACKUP_KEEP: ${NGINX_UI_BACKUP_KEEP:-4}
+      NGINX_AUTOHANDLER_BACKUP_KEEP: ${NGINX_AUTOHANDLER_BACKUP_KEEP:-4}
       UI_USER: ${UI_USER:-admin}
       UI_PASSWORD: ${UI_PASSWORD:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
@@ -23,5 +23,5 @@ services:
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
     volumes:
       - ./data/nginx:/etc/nginx
-      - ./data/ui:/var/lib/nginx-ui
+      - ./data/ui:/var/lib/nginx-autohandler
       - ./data/certs:/etc/letsencrypt

@@ -1,11 +1,11 @@
-# nginx-ui
+# nginx-autohandler
 
 A single container that runs nginx with a web editor for its config, plus Cloudflare DNS sync.
 
 - **Files:** browse, view, edit, create and delete under `/etc/nginx`.
 - **Raw and Blocks editors:** edit the text directly, or use the block view to edit directives and nested blocks like `server`, `location` and `upstream`. The block view keeps comments and anything it doesn't model, so the file round-trips byte for byte when you don't change it.
 - **Safe apply:** every save writes the file, runs `nginx -t` on the whole config and reloads if auto-reload is on. If the test or reload fails, the previous file is put back and the editor keeps your text.
-- **Backups:** each change snapshots the old file. The last 4 per file are kept (`NGINX_UI_BACKUP_KEEP`). The History dialog restores any of them.
+- **Backups:** each change snapshots the old file. The last 4 per file are kept (`NGINX_AUTOHANDLER_BACKUP_KEEP`). The History dialog restores any of them.
 - **Cloudflare:** a `server_name` saved in a config gets an A record pointing at this host. Tracked domains are kept current on a timer (`CLOUDFLARE_IP_SYNC`).
 - **Login is optional:** set `UI_PASSWORD` for basic auth, or leave it empty when a proxy handles login.
 

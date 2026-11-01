@@ -16,7 +16,7 @@ import urllib.request
 API = "https://api.cloudflare.com/client/v4"
 IP_URLS = ["https://api.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com"]
 
-log = logging.getLogger("nginx-ui.cloudflare")
+log = logging.getLogger("nginx-autohandler.cloudflare")
 
 
 class CloudflareError(RuntimeError):

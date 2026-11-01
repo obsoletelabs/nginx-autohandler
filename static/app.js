@@ -33,7 +33,7 @@ function el(tag, className, text) {
 }
 
 async function api(method, url, body) {
-  const opts = { method, headers: { "X-Requested-With": "nginx-ui" } };
+  const opts = { method, headers: { "X-Requested-With": "nginx-autohandler" } };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);

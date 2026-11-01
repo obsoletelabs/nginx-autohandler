@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nginx-ui: web editor for nginx configs with safe apply, backups and Cloudflare DNS.
+"""nginx-autohandler: web editor for nginx configs with safe apply, backups and Cloudflare DNS.
 
 Runs next to nginx in one container (see entrypoint.sh). Standard library only.
 
@@ -33,10 +33,10 @@ def env_bool(name, default):
 
 
 CONF_ROOT = Path(os.environ.get("NGINX_CONF_ROOT", "/etc/nginx")).resolve()
-DATA_DIR = Path(os.environ.get("NGINX_UI_DATA", "/var/lib/nginx-ui"))
+DATA_DIR = Path(os.environ.get("NGINX_AUTOHANDLER_DATA", "/var/lib/nginx-autohandler"))
 BACKUP_DIR = DATA_DIR / "backups"
 STATE_FILE = DATA_DIR / "state.json"
-BACKUP_KEEP = int(os.environ.get("NGINX_UI_BACKUP_KEEP", "4"))
+BACKUP_KEEP = int(os.environ.get("NGINX_AUTOHANDLER_BACKUP_KEEP", "4"))
 AUTO_RELOAD = env_bool("NGINX_AUTO_RELOAD", True)
 
 UI_PORT = int(os.environ.get("UI_PORT", "8080"))
@@ -68,7 +68,7 @@ ERROR_STATUS = [
     (cloudflare.CloudflareError, 502),
 ]
 
-log = logging.getLogger("nginx-ui")
+log = logging.getLogger("nginx-autohandler")
 io_lock = threading.RLock()
 dns_lock = threading.Lock()
 state_lock = threading.Lock()
@@ -229,7 +229,7 @@ def apply_change(path, content):
             restore(path, old)
             if reload_tried:
                 nginx("-s", "reload")
-            notify(f"nginx-ui on {socket.gethostname()}: change to {rel(path)} rejected and rolled back.")
+            notify(f"nginx-autohandler on {socket.gethostname()}: change to {rel(path)} rejected and rolled back.")
             return {"ok": False, "saved": False, "reloaded": False, "rolled_back": True, "output": output}
 
     result = {"ok": True, "saved": True, "reloaded": reloaded, "rolled_back": False, "output": output}
@@ -240,7 +240,7 @@ def apply_change(path, content):
             state["domains"] = sorted(set(state["domains"]) | set(names))
             save_state(state)
             result["dns"] = sync_domains(names)
-    notify(f"nginx-ui: {'deleted' if content is None else 'saved'} {rel(path)}"
+    notify(f"nginx-autohandler: {'deleted' if content is None else 'saved'} {rel(path)}"
            + (" and reloaded nginx" if reloaded else ""))
     return result
 
@@ -303,7 +303,7 @@ def dns_loop():
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "nginx-ui"
+    server_version = "nginx-autohandler"
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)
@@ -345,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method):
         if not self.authorized():
             self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="nginx-ui"')
+            self.send_header("WWW-Authenticate", 'Basic realm="nginx-autohandler"')
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -353,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and (url.path == "/" or url.path.startswith("/static/")):
             return self.static(url.path)
         # A custom header forces browsers to preflight cross-site writes, which blocks CSRF.
-        if method != "GET" and self.headers.get("X-Requested-With") != "nginx-ui":
+        if method != "GET" and self.headers.get("X-Requested-With") != "nginx-autohandler":
             return self.json(403, {"error": "missing X-Requested-With header"})
         handler = ROUTES.get((method, url.path))
         if handler is None:
@@ -539,7 +539,7 @@ def main():
         threading.Thread(target=dns_loop, daemon=True).start()
     elif cf is None:
         log.info("Cloudflare disabled (set CLOUDFLARE_API_TOKEN)")
-    log.info("nginx-ui on :%s, editing %s, auto-reload=%s", UI_PORT, CONF_ROOT, AUTO_RELOAD)
+    log.info("nginx-autohandler on :%s, editing %s, auto-reload=%s", UI_PORT, CONF_ROOT, AUTO_RELOAD)
     ThreadingHTTPServer(("0.0.0.0", UI_PORT), Handler).serve_forever()
 
 
