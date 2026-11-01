@@ -548,6 +548,9 @@ function bindEvents() {
   $("btnCerts").onclick = () => openCerts().catch(report);
   $("btnIssue").onclick = () => issueCert().catch(report);
   $("btnClearLog").onclick = () => { $("output").textContent = ""; };
+  for (const btn of document.querySelectorAll(".close-dialog")) {
+    btn.onclick = () => btn.closest("dialog").close();
+  }
   $("modeRaw").onclick = () => setMode("raw").catch(report);
   $("modeBlocks").onclick = () => setMode("blocks").catch(report);
   $("editor").addEventListener("input", () => {
