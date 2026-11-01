@@ -7,9 +7,9 @@ const S = {
   config: null,
   root: "",
   dir: "",
-  file: null,   // path of the open file, relative to root
-  content: "",  // last saved or raw text
-  doc: null,    // parsed document while in Blocks mode
+  file: null,   // open file, relative to root
+  content: "",  // last loaded or saved raw text
+  nodes: null,  // parsed tree while in Blocks mode
   mode: "raw",  // "raw" | "blocks"
   dirty: false,
 };
@@ -94,16 +94,16 @@ function entryRow(entry) {
 
 // ---------------------------------------------------------------- open, save, apply
 
-async function confirmDiscard() {
+function confirmDiscard() {
   return !S.dirty || confirm("Discard unsaved changes?");
 }
 
 async function openFile(path) {
-  if (!(await confirmDiscard())) return;
+  if (!confirmDiscard()) return;
   const data = await api("GET", "/api/file?path=" + encodeURIComponent(path));
   S.file = data.path;
   S.content = data.content;
-  S.doc = null;
+  S.nodes = null;
   S.mode = "raw";
   setModeButtons();
   $("editor").value = data.content;
@@ -115,7 +115,7 @@ async function openFile(path) {
 
 async function currentContent() {
   if (S.mode === "raw") return $("editor").value;
-  const data = await api("POST", "/api/blocks/render", { doc: S.doc });
+  const data = await api("POST", "/api/blocks/render", { nodes: S.nodes });
   return data.content;
 }
 
@@ -147,7 +147,7 @@ async function save() {
 }
 
 async function newFile() {
-  if (!(await confirmDiscard())) return;
+  if (!confirmDiscard()) return;
   const base = S.dir ? S.root + "/" + S.dir : S.root;
   const name = prompt(`New file, relative to ${base}\n(e.g. conf.d/example.conf)`);
   if (!name || !name.trim()) return;
@@ -182,23 +182,16 @@ function setModeButtons() {
   $("blocks").classList.toggle("hidden", raw);
 }
 
-async function setMode(mode, opts = {}) {
+async function setMode(mode) {
   if (mode === S.mode) return;
   if (mode === "blocks") {
-    const source = $("editor").value;
-    try {
-      const data = await api("POST", "/api/blocks/parse", { content: source });
-      S.doc = data.doc;
-      S.mode = "blocks";
-      renderBlocks();
-    } catch (e) {
-      if (!opts.silent) report(new Error("Blocks view needs valid syntax: " + e.message));
-      return;
-    }
+    const data = await api("POST", "/api/blocks/parse", { content: $("editor").value });
+    S.nodes = data.nodes;
+    S.mode = "blocks";
+    renderBlocks();
   } else {
-    const content = await currentContent();
-    $("editor").value = content;
-    S.doc = null;
+    $("editor").value = await currentContent();
+    S.nodes = null;
     S.mode = "raw";
   }
   setModeButtons();
@@ -208,16 +201,14 @@ function markDirty() {
   setDirty(true);
 }
 
-function newNode(name, args, block, depth) {
+function newNode(kind, name, args, depth) {
   return {
-    name,
-    args,
-    block,
-    lead: "\n" + INDENT.repeat(depth),
-    text: "",
-    closing: block ? "\n" + INDENT.repeat(depth) : "",
-    dirty: true,
+    kind,
+    name: kind === "comment" ? "" : name,
+    args: kind === "comment" ? [] : args,
     children: [],
+    text: kind === "comment" ? name : "",
+    line: null,
   };
 }
 
@@ -225,8 +216,8 @@ function renderBlocks() {
   const root = $("blocks");
   root.textContent = "";
   const wrap = el("div", "block-root");
-  wrap.append(nodeList(S.doc.children, 0));
-  wrap.append(addRow(S.doc.children, 0, true));
+  wrap.append(nodeList(S.nodes, 0));
+  wrap.append(addRow(S.nodes, 0, true));
   root.append(wrap);
 }
 
@@ -238,20 +229,44 @@ function nodeList(list, depth) {
 
 function nodeView(list, index, depth) {
   const node = list[index];
-  const wrap = el("div", "node" + (node.block ? " block" : ""));
+
+  if (node.kind === "comment") {
+    const row = el("div", "node-row comment-row");
+    const text = el("input", "cell comment");
+    text.value = node.text;
+    text.setAttribute("aria-label", "Comment");
+    text.oninput = () => { node.text = text.value; markDirty(); };
+    row.append(text, nodeActions(list, index, depth));
+    return row;
+  }
+
+  const wrap = el("div", "node" + (node.kind === "block" ? " block" : ""));
   const row = el("div", "node-row");
 
   const name = el("input", "cell name");
   name.value = node.name;
   name.setAttribute("aria-label", "Directive name");
-  name.oninput = () => { node.name = name.value.trim(); node.dirty = true; markDirty(); };
+  name.oninput = () => { node.name = name.value.trim(); markDirty(); };
 
   const args = el("input", "cell");
   args.value = node.args.join(" ");
-  args.placeholder = node.block ? "arguments, e.g. ~ ^/api/" : "arguments, e.g. 127.0.0.1:3000;";
+  args.placeholder = node.kind === "block" ? "arguments, e.g. ~ ^/api/" : "arguments, e.g. 127.0.0.1:3000";
   args.setAttribute("aria-label", "Arguments");
-  args.oninput = () => { node.args = splitArgs(args.value); node.dirty = true; markDirty(); };
+  args.oninput = () => { node.args = splitArgs(args.value); markDirty(); };
 
+  row.append(name, args, nodeActions(list, index, depth));
+  wrap.append(row);
+
+  if (node.kind === "block") {
+    const kids = el("div", "node-children");
+    kids.append(nodeList(node.children, depth + 1));
+    kids.append(addRow(node.children, depth + 1, false));
+    wrap.append(kids);
+  }
+  return wrap;
+}
+
+function nodeActions(list, index, depth) {
   const actions = el("div", "node-actions");
   actions.append(
     actionButton("Up", "Move up", () => move(list, index, -1)),
@@ -262,17 +277,7 @@ function nodeView(list, index, depth) {
       renderBlocks();
     }, "danger"),
   );
-
-  row.append(name, args, actions);
-  wrap.append(row);
-
-  if (node.block) {
-    const kids = el("div", "node-children");
-    kids.append(nodeList(node.children, depth + 1));
-    kids.append(addRow(node.children, depth + 1, false));
-    wrap.append(kids);
-  }
-  return wrap;
+  return actions;
 }
 
 function actionButton(label, title, onClick, extra) {
@@ -294,20 +299,25 @@ function addRow(list, depth, isRoot) {
   const row = el("div", "add-row" + (isRoot ? " root" : ""));
   row.append(
     actionButton("+ Directive", "Add a directive", () => {
-      const text = prompt("Directive, e.g.: listen 80;  (name and arguments)");
+      const text = prompt("Directive, e.g.:  listen 80");
       if (!text || !text.trim()) return;
       const [name, ...args] = splitArgs(text.trim().replace(/;$/, ""));
       if (!name) return;
-      list.push(newNode(name, args, false, depth));
+      list.push(newNode("directive", name, args, depth));
       markDirty();
       renderBlocks();
     }),
     actionButton("+ Block", "Add a block, e.g. location /", () => {
-      const text = prompt("Block header, e.g.: location /api/");
+      const text = prompt("Block header, e.g.:  location /api/");
       if (!text || !text.trim()) return;
       const [name, ...args] = splitArgs(text.trim());
       if (!name) return;
-      list.push(newNode(name, args, true, depth));
+      list.push(newNode("block", name, args, depth));
+      markDirty();
+      renderBlocks();
+    }),
+    actionButton("+ Comment", "Add a comment line", () => {
+      list.push(newNode("comment", "# ", [], depth));
       markDirty();
       renderBlocks();
     }),
@@ -356,7 +366,7 @@ async function openHistory() {
 async function openDns() {
   const data = await api("GET", "/api/dns");
   if (!data.configured) {
-    $("dnsSummary").textContent = "Cloudflare is off. Set CLOUDFLARE_API_TOKEN to enable it.";
+    $("dnsSummary").textContent = "Cloudflare is off. Add an API token in Settings to enable it.";
   } else {
     const results = Object.entries(data.results || {}).map(([d, r]) => `${d}: ${r}`).join("\n");
     $("dnsSummary").textContent = data.last_run
@@ -370,6 +380,148 @@ async function openDns() {
   $("dlgDns").showModal();
 }
 
+// ---------------------------------------------------------------- settings
+
+const SETTING_INPUTS = new Map(); // key -> { read(), changed(), kind }
+
+function sourceLabel(item) {
+  if (item.source === "env") return `from environment (${item.env})`;
+  if (item.source === "ui") return "saved in the UI";
+  return "default";
+}
+
+function settingRow(item) {
+  const row = el("div", "setting");
+  const head = el("div", "setting-head");
+  head.append(el("span", "setting-label", item.label), el("span", "badge" + (item.source === "env" ? " locked" : ""), sourceLabel(item)));
+  row.append(head);
+
+  const control = el("div", "setting-control");
+  let input;
+  let initial;
+  if (item.kind === "bool") {
+    input = el("input");
+    input.type = "checkbox";
+    input.checked = item.value;
+    initial = item.value;
+    input.onchange = () => markChanged(item.key);
+    control.append(input);
+    SETTING_INPUTS.set(item.key, { read: () => input.checked, changed: () => input.checked !== initial });
+  } else if (item.kind === "choice") {
+    input = el("select", "cell");
+    for (const choice of item.choices) {
+      const opt = el("option", "", choice);
+      opt.value = choice;
+      input.append(opt);
+    }
+    input.value = item.value;
+    initial = item.value;
+    input.onchange = () => markChanged(item.key);
+    control.append(input);
+    SETTING_INPUTS.set(item.key, { read: () => input.value, changed: () => input.value !== initial });
+  } else if (item.kind === "secret") {
+    input = el("input", "cell");
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.placeholder = item.is_set ? "set. type to replace" : "not set";
+    input.oninput = () => markChanged(item.key);
+    const clear = actionButton("Clear", "Remove the saved value", () => {
+      input.value = "";
+      SETTING_INPUTS.get(item.key).clear = true;
+      input.placeholder = "will be cleared on save";
+      markChanged(item.key);
+    });
+    control.append(input, clear);
+    SETTING_INPUTS.set(item.key, {
+      read: () => (SETTING_INPUTS.get(item.key).clear ? "" : input.value),
+      changed: () => SETTING_INPUTS.get(item.key).clear || input.value !== "",
+    });
+  } else {
+    input = el("input", "cell");
+    input.type = item.kind === "int" ? "number" : "text";
+    input.value = item.value;
+    initial = String(item.value);
+    input.oninput = () => markChanged(item.key);
+    control.append(input);
+    SETTING_INPUTS.set(item.key, { read: () => input.value, changed: () => input.value !== initial });
+  }
+  input.disabled = item.locked;
+  for (const btn of control.querySelectorAll("button")) btn.disabled = item.locked;
+  row.append(control);
+  return row;
+}
+
+function markChanged(key) {
+  const entry = SETTING_INPUTS.get(key);
+  entry.dirtyFlag = true;
+}
+
+function renderSettings(data) {
+  SETTING_INPUTS.clear();
+  const groups = $("settingsGroups");
+  groups.textContent = "";
+  const byGroup = new Map();
+  for (const item of data.settings) {
+    if (!byGroup.has(item.group)) byGroup.set(item.group, []);
+    byGroup.get(item.group).push(item);
+  }
+  for (const [group, items] of byGroup) {
+    const section = el("section", "setting-group");
+    section.append(el("h3", "sub", group));
+    for (const item of items) section.append(settingRow(item));
+    groups.append(section);
+  }
+}
+
+async function openSettings() {
+  const data = await api("GET", "/api/settings");
+  renderSettings(data);
+  $("dlgSettings").showModal();
+}
+
+async function saveSettings() {
+  const values = {};
+  for (const [key, entry] of SETTING_INPUTS) {
+    if (entry.changed()) values[key] = entry.read();
+  }
+  if (!Object.keys(values).length) return log("Nothing changed in Settings.");
+  const data = await api("PUT", "/api/settings", { values });
+  renderSettings(data);
+  const status = await api("GET", "/api/config");
+  S.config = status;
+  setBadges(status);
+  log(`Saved ${Object.keys(values).length} setting(s).`);
+}
+
+async function testNotify() {
+  const data = await api("POST", "/api/notify/test");
+  for (const [channel, outcome] of Object.entries(data.results)) log(`Test ${channel}: ${outcome}`);
+}
+
+// ---------------------------------------------------------------- certificates
+
+async function openCerts() {
+  const data = await api("GET", "/api/certs");
+  $("certStaging").checked = data.staging;
+  $("certList").textContent = data.output || "No certificates yet.";
+  $("dlgCerts").showModal();
+}
+
+async function issueCert() {
+  const domains = $("certDomains").value;
+  if (!domains.trim()) return log("Enter at least one domain.");
+  log("Requesting a certificate. DNS-01 can take a few minutes...");
+  const data = await api("POST", "/api/certs/issue", { domains, staging: $("certStaging").checked });
+  log((data.ok ? "Certificate issued" : "Certificate request failed") + (data.staging ? " (staging)." : "."));
+  log(data.output);
+  if (data.dns) {
+    if (data.dns.error) log("DNS: " + data.dns.error);
+    else for (const [domain, outcome] of Object.entries(data.dns.results)) log(`DNS ${domain}: ${outcome}`);
+  }
+  const list = await api("GET", "/api/certs");
+  $("certList").textContent = list.output || "No certificates yet.";
+}
+
 // ---------------------------------------------------------------- startup
 
 function setBadges(config) {
@@ -379,7 +531,7 @@ function setBadges(config) {
   const reloadBadge = $("reloadBadge");
   reloadBadge.textContent = config.auto_reload ? "auto-reload on" : "auto-reload off";
   reloadBadge.classList.toggle("on", config.auto_reload);
-  $("btnDns").hidden = !config.cloudflare.configured;
+  $("btnDns").hidden = !config.cloudflare;
 }
 
 function bindEvents() {
@@ -390,6 +542,11 @@ function bindEvents() {
   $("btnTest").onclick = () => testConfig().catch(report);
   $("btnReload").onclick = () => reloadNginx().catch(report);
   $("btnDns").onclick = () => openDns().catch(report);
+  $("btnSettings").onclick = () => openSettings().catch(report);
+  $("btnSaveSettings").onclick = () => saveSettings().catch(report);
+  $("btnTestNotify").onclick = () => testNotify().catch(report);
+  $("btnCerts").onclick = () => openCerts().catch(report);
+  $("btnIssue").onclick = () => issueCert().catch(report);
   $("btnClearLog").onclick = () => { $("output").textContent = ""; };
   $("modeRaw").onclick = () => setMode("raw").catch(report);
   $("modeBlocks").onclick = () => setMode("blocks").catch(report);

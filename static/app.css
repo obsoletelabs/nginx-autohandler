@@ -301,3 +301,21 @@ code { font-family: var(--mono); font-size: 12px; }
   .node-actions { justify-content: flex-end; }
   .topbar .ghost { padding: 6px 8px; }
 }
+
+/* ---- settings and certificates ---- */
+.wide { width: min(760px, calc(100vw - 32px)); }
+.setting-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.sub { font-size: 13px; margin: 6px 0 2px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+.setting { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.setting-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+.setting-label { font-weight: 600; }
+.setting-control { display: flex; gap: 8px; align-items: center; }
+.setting-control input.cell, .setting-control select.cell { flex: 1; }
+.setting-control input[type="checkbox"] { width: 18px; height: 18px; }
+.badge.locked { color: var(--accent); border-color: var(--accent); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.pre { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; max-height: 240px; overflow: auto; }
+.comment-row { grid-template-columns: 1fr auto; }
+input.cell.comment { color: var(--muted); font-style: italic; }
+dialog.wide { width: min(760px, calc(100vw - 32px)); max-height: 90vh; }
+.dialog { width: 100%; }

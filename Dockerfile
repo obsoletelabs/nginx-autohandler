@@ -1,10 +1,11 @@
 FROM nginx:1.27-alpine
 
-RUN apk add --no-cache python3 \
+RUN apk add --no-cache python3 certbot certbot-dns-cloudflare \
     && cp -a /etc/nginx /etc/nginx.default \
     && mkdir -p /app /var/lib/nginx-autohandler
 
-COPY server.py cloudflare.py nginx_config.py entrypoint.sh /app/
+COPY server.py cloudflare.py certs.py notify.py settings.py entrypoint.sh /app/
+COPY nginx_model /app/nginx_model
 COPY static /app/static
 RUN chmod +x /app/entrypoint.sh
 

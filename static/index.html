@@ -12,9 +12,11 @@
   <span id="authBadge" class="badge"></span>
   <span id="reloadBadge" class="badge"></span>
   <span class="spacer"></span>
-  <button id="btnDns" class="ghost">Cloudflare DNS</button>
+  <button id="btnCerts" class="ghost">Certificates</button>
+  <button id="btnDns" class="ghost">DNS</button>
   <button id="btnTest" class="ghost">Test config</button>
   <button id="btnReload" class="ghost">Reload nginx</button>
+  <button id="btnSettings" class="primary">Settings</button>
 </header>
 
 <div class="layout">
@@ -60,6 +62,44 @@
     </section>
   </main>
 </div>
+
+<dialog id="dlgSettings" class="wide">
+  <form method="dialog" class="dialog">
+    <h2>Settings</h2>
+    <p class="muted small">
+      Environment variables win over anything saved here, and those fields are locked.
+      Secrets are write-only: the UI shows whether they are set, never the value.
+    </p>
+    <div id="settingsGroups"></div>
+    <div class="dialog-actions">
+      <button id="btnTestNotify" type="button" class="ghost">Send test notification</button>
+      <span class="spacer"></span>
+      <button class="ghost" value="close">Close</button>
+      <button id="btnSaveSettings" type="button" class="primary">Save settings</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlgCerts" class="wide">
+  <form method="dialog" class="dialog">
+    <h2>Certificates</h2>
+    <p class="muted small">
+      Let's Encrypt via DNS-01 on Cloudflare, so wildcards work. Needs the API token and contact
+      email in Settings. Staging is on by default: staging certificates are not trusted by browsers.
+    </p>
+    <label class="field">
+      <span>Domains (one per line; use *.example.com for a wildcard)</span>
+      <textarea id="certDomains" rows="4" spellcheck="false"></textarea>
+    </label>
+    <label class="check"><input id="certStaging" type="checkbox"> Use staging</label>
+    <div class="dialog-actions">
+      <button class="ghost" value="close">Close</button>
+      <button id="btnIssue" type="button" class="primary">Issue certificate</button>
+    </div>
+    <h3 class="sub">Current certificates</h3>
+    <pre id="certList" class="pre"></pre>
+  </form>
+</dialog>
 
 <dialog id="dlgDns">
   <form method="dialog" class="dialog">

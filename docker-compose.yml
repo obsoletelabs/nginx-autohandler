@@ -8,19 +8,31 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "8080:8080"   # editor UI, bound to all interfaces; put your TLS reverse proxy in front
+      # Editor UI on host port 8090 (8080 is taken on this PC). Put your TLS reverse proxy in front.
+      - "8090:8080"
+    # Every setting below is optional. A non-empty value here locks that setting in the UI.
+    # Leave them empty to set things from the Settings dialog instead.
     environment:
-      NGINX_AUTO_RELOAD: ${NGINX_AUTO_RELOAD:-true}
-      NGINX_AUTOHANDLER_BACKUP_KEEP: ${NGINX_AUTOHANDLER_BACKUP_KEEP:-4}
       UI_USER: ${UI_USER:-admin}
       UI_PASSWORD: ${UI_PASSWORD:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      CLOUDFLARE_PROXIED: ${CLOUDFLARE_PROXIED:-}
+      CLOUDFLARE_IP_SYNC: ${CLOUDFLARE_IP_SYNC:-}
+      CLOUDFLARE_DNS_FROM_CONFIGS: ${CLOUDFLARE_DNS_FROM_CONFIGS:-}
+      CLOUDFLARE_CHECK_INTERVAL_SECONDS: ${CLOUDFLARE_CHECK_INTERVAL_SECONDS:-}
       CLOUDFLARE_DOMAINS: ${CLOUDFLARE_DOMAINS:-}
-      CLOUDFLARE_IP_SYNC: ${CLOUDFLARE_IP_SYNC:-true}
-      CLOUDFLARE_DNS_FROM_CONFIGS: ${CLOUDFLARE_DNS_FROM_CONFIGS:-true}
-      CLOUDFLARE_PROXIED: ${CLOUDFLARE_PROXIED:-false}
-      CLOUDFLARE_CHECK_INTERVAL_SECONDS: ${CLOUDFLARE_CHECK_INTERVAL_SECONDS:-600}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ACME_STAGING: ${ACME_STAGING:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TO: ${SMTP_TO:-}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      NGINX_AUTO_RELOAD: ${NGINX_AUTO_RELOAD:-}
+      NGINX_AUTOHANDLER_BACKUP_KEEP: ${NGINX_AUTOHANDLER_BACKUP_KEEP:-}
     volumes:
       - ./data/nginx:/etc/nginx
       - ./data/ui:/var/lib/nginx-autohandler

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""nginx-autohandler: web editor for nginx configs with safe apply, backups and Cloudflare DNS.
+"""nginx-autohandler: web editor for nginx configs with safe apply, backups,
+Cloudflare DNS, DNS-01 certificates and Discord/email notifications.
 
-Runs next to nginx in one container (see entrypoint.sh). Standard library only.
+Runs next to nginx in one container (see entrypoint.sh). Standard library only,
+apart from certbot, which is a system package.
 
 Every save goes through apply_change(): snapshot the old file, write the new one,
-run `nginx -t` on the whole config, reload if NGINX_AUTO_RELOAD is on, and put the
-old file back if any step fails. An invalid config never stays on disk.
+run `nginx -t` on the whole config, reload if auto-reload is on, and put the old
+file back if any step fails. An invalid config never stays on disk.
 """
 
 import base64
@@ -18,38 +20,28 @@ import socket
 import subprocess
 import threading
 import time
-import urllib.request
+from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import certs
 import cloudflare
-import nginx_config
-
-
-def env_bool(name, default):
-    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
-
+import notify
+import settings
+from nginx_model import parse as parse_nginx
+from nginx_model import render as render_nginx
+from nginx_model.representation import Node
 
 CONF_ROOT = Path(os.environ.get("NGINX_CONF_ROOT", "/etc/nginx")).resolve()
-DATA_DIR = Path(os.environ.get("NGINX_AUTOHANDLER_DATA", "/var/lib/nginx-autohandler"))
+DATA_DIR = settings.DATA_DIR
 BACKUP_DIR = DATA_DIR / "backups"
 STATE_FILE = DATA_DIR / "state.json"
-BACKUP_KEEP = int(os.environ.get("NGINX_AUTOHANDLER_BACKUP_KEEP", "4"))
-AUTO_RELOAD = env_bool("NGINX_AUTO_RELOAD", True)
 
 UI_PORT = int(os.environ.get("UI_PORT", "8080"))
 UI_USER = os.environ.get("UI_USER", "admin")
-UI_PASSWORD = os.environ.get("UI_PASSWORD", "")  # empty disables basic auth (e.g. when a proxy handles it)
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
-
-CF_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-CF_IP_SYNC = env_bool("CLOUDFLARE_IP_SYNC", True)
-CF_DNS_FROM_CONFIGS = env_bool("CLOUDFLARE_DNS_FROM_CONFIGS", True)
-CF_PROXIED = env_bool("CLOUDFLARE_PROXIED", False)
-CF_INTERVAL = int(os.environ.get("CLOUDFLARE_CHECK_INTERVAL_SECONDS", "600"))
-ENV_DOMAINS = [d.strip().lower() for d in os.environ.get("CLOUDFLARE_DOMAINS", "").split(",") if d.strip()]
+UI_PASSWORD = os.environ.get("UI_PASSWORD", "")  # env only; empty disables login
 
 MAX_BODY = 2 * 1024 * 1024
 STATIC_DIR = Path(__file__).with_name("static")
@@ -64,6 +56,8 @@ ERROR_STATUS = [
     (FileExistsError, 409),
     (IsADirectoryError, 400),
     (NotADirectoryError, 400),
+    (settings.SettingError, 400),
+    (certs.CertError, 400),
     (ValueError, 400),
     (cloudflare.CloudflareError, 502),
 ]
@@ -73,28 +67,22 @@ io_lock = threading.RLock()
 dns_lock = threading.Lock()
 state_lock = threading.Lock()
 last_dns = {"last_run": None, "ip": None, "results": {}, "error": None}
-
-cf = cloudflare.Cloudflare(CF_TOKEN, CF_PROXIED) if CF_TOKEN else None
+_cf_cache = {"key": None, "client": None}
 
 
 def now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def notify(text):
-    """Post a short message to Discord when DISCORD_WEBHOOK_URL is set."""
-    if not DISCORD_WEBHOOK_URL:
-        return
-    try:
-        req = urllib.request.Request(
-            DISCORD_WEBHOOK_URL,
-            data=json.dumps({"content": text[:1900]}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=10).close()
-    except OSError as exc:
-        log.warning("Discord notification failed: %s", exc)
+def get_cf():
+    """Cloudflare client for the current token, or None when no token is set."""
+    token = settings.get("cloudflare_api_token")
+    if not token:
+        return None
+    key = (token, settings.get("cloudflare_proxied"))
+    if _cf_cache["key"] != key:
+        _cf_cache.update(key=key, client=cloudflare.Cloudflare(*key))
+    return _cf_cache["client"]
 
 
 # ---------------------------------------------------------------- state
@@ -114,9 +102,16 @@ def save_state(state):
         os.replace(tmp, STATE_FILE)
 
 
+def add_domains(names):
+    state = load_state()
+    state["domains"] = sorted(set(state["domains"]) | set(names))
+    save_state(state)
+
+
 def tracked_domains():
-    """Domains kept in DNS: the ones saved in the UI or found in configs, plus CLOUDFLARE_DOMAINS."""
-    return set(load_state()["domains"]) | set(ENV_DOMAINS)
+    """Domains kept in DNS: saved in the UI, found in configs, or from CLOUDFLARE_DOMAINS."""
+    env = [d.strip().lower() for d in os.environ.get("CLOUDFLARE_DOMAINS", "").split(",") if d.strip()]
+    return set(load_state()["domains"]) | set(env)
 
 
 # ---------------------------------------------------------------- files
@@ -180,7 +175,8 @@ def snapshot(path):
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     shutil.copy2(path, BACKUP_DIR / f"{backup_key(path)}.{stamp}")
-    for old in backups_for(path)[:-BACKUP_KEEP]:
+    keep = max(1, settings.get("backup_keep"))
+    for old in backups_for(path)[:-keep]:
         old.unlink(missing_ok=True)
 
 
@@ -196,6 +192,30 @@ def restore(path, old_content):
 def nginx(*args):
     proc = subprocess.run(["nginx", *args], capture_output=True, text=True, timeout=60)
     return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+
+
+def server_names(content):
+    """Hostnames declared with server_name in `content`."""
+    try:
+        nodes = parse_nginx(content)
+    except ValueError:
+        return []
+    names = set()
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        stack.extend(node.children)
+        if node.kind != "directive" or node.name != "server_name":
+            continue
+        for arg in node.args:
+            host = arg.strip("'\"").lower()
+            if cloudflare_hostname(host) and not host.split(".")[-1].isdigit():
+                names.add(host)
+    return sorted(names)
+
+
+def cloudflare_hostname(host):
+    return certs.HOST_RE.match(host) is not None and not host.startswith("*.")
 
 
 def apply_change(path, content):
@@ -219,7 +239,7 @@ def apply_change(path, content):
         ok, output = nginx("-t")
         reload_tried = False
         reloaded = False
-        if ok and AUTO_RELOAD:
+        if ok and settings.get("auto_reload"):
             reload_tried = True
             reloaded, reload_out = nginx("-s", "reload")
             output = "\n".join(part for part in (output, reload_out) if part)
@@ -229,20 +249,27 @@ def apply_change(path, content):
             restore(path, old)
             if reload_tried:
                 nginx("-s", "reload")
-            notify(f"nginx-autohandler on {socket.gethostname()}: change to {rel(path)} rejected and rolled back.")
+            notify_safe(f"change to {rel(path)} rejected",
+                        f"nginx-autohandler on {socket.gethostname()} rolled back {rel(path)}.\n\n{output}")
             return {"ok": False, "saved": False, "reloaded": False, "rolled_back": True, "output": output}
 
     result = {"ok": True, "saved": True, "reloaded": reloaded, "rolled_back": False, "output": output}
-    if content is not None and cf is not None and CF_DNS_FROM_CONFIGS:
-        names = nginx_config.server_names(content)
+    if content is not None and get_cf() is not None and settings.get("cloudflare_dns_from_configs"):
+        names = server_names(content)
         if names:
-            state = load_state()
-            state["domains"] = sorted(set(state["domains"]) | set(names))
-            save_state(state)
+            add_domains(names)
             result["dns"] = sync_domains(names)
-    notify(f"nginx-autohandler: {'deleted' if content is None else 'saved'} {rel(path)}"
-           + (" and reloaded nginx" if reloaded else ""))
+    verb = "deleted" if content is None else "saved"
+    notify_safe(f"{verb} {rel(path)}", f"nginx-autohandler {verb} {rel(path)}"
+                + (" and reloaded nginx." if reloaded else "."))
     return result
+
+
+def notify_safe(subject, text):
+    try:
+        notify.send(subject, text)
+    except Exception:  # notifications must never break a save
+        log.exception("notification failed")
 
 
 # ---------------------------------------------------------------- cloudflare
@@ -252,7 +279,7 @@ def config_domains():
     for conf in CONF_ROOT.rglob("*.conf"):
         if conf.is_file():
             try:
-                names.update(nginx_config.server_names(conf.read_text(encoding="utf-8")))
+                names.update(server_names(conf.read_text(encoding="utf-8")))
             except (OSError, ValueError):
                 continue
     return names
@@ -260,13 +287,14 @@ def config_domains():
 
 def sync_domains(domains, ip=None):
     """Point each domain's A record at `ip` (default: this host's public IP)."""
-    if cf is None:
-        return {"error": "CLOUDFLARE_API_TOKEN is not set"}
+    client = get_cf()
+    if client is None:
+        return {"error": "Cloudflare API token is not set"}
     ip = ip or cloudflare.public_ip()
     results = {}
     for domain in sorted(domains):
         try:
-            results[domain] = cf.set_a(domain, ip)
+            results[domain] = client.set_a(domain, ip)
         except cloudflare.CloudflareError as exc:
             log.error("DNS for %s failed: %s", domain, exc)
             results[domain] = f"error: {exc}"
@@ -274,9 +302,9 @@ def sync_domains(domains, ip=None):
 
 
 def run_dns_sync():
-    """Full sync: every tracked domain plus every server_name found in the configs."""
-    if cf is None:
-        return {"error": "CLOUDFLARE_API_TOKEN is not set"}
+    """Full sync: tracked domains plus every server_name found in the configs."""
+    if get_cf() is None:
+        return {"error": "Cloudflare API token is not set"}
     with dns_lock:
         status = {"last_run": now(), "ip": None, "results": {}, "error": None}
         try:
@@ -295,9 +323,11 @@ def run_dns_sync():
 
 
 def dns_loop():
+    """Re-check the public IP on the configured interval. Settings are read each pass."""
     while True:
-        run_dns_sync()
-        time.sleep(CF_INTERVAL)
+        if get_cf() is not None and settings.get("cloudflare_ip_sync"):
+            run_dns_sync()
+        time.sleep(max(60, settings.get("cloudflare_check_interval_seconds")))
 
 
 # ---------------------------------------------------------------- HTTP
@@ -398,14 +428,10 @@ def get_config(h, q):
     h.json(200, {
         "auth": bool(UI_PASSWORD),
         "root": str(CONF_ROOT),
-        "auto_reload": AUTO_RELOAD,
-        "backup_keep": BACKUP_KEEP,
-        "cloudflare": {
-            "configured": cf is not None,
-            "ip_sync": CF_IP_SYNC,
-            "dns_from_configs": CF_DNS_FROM_CONFIGS,
-            "proxied": CF_PROXIED,
-        },
+        "auto_reload": settings.get("auto_reload"),
+        "backup_keep": settings.get("backup_keep"),
+        "cloudflare": get_cf() is not None,
+        "notify": notify.configured(),
     })
 
 
@@ -444,7 +470,8 @@ def delete_file(h, q):
 
 def get_backups(h, q):
     path = safe_path(q.get("path", [""])[0])
-    items = [{"name": p.name, "time": datetime.strptime(p.name.rsplit(".", 1)[-1], "%Y%m%d-%H%M%S-%f")
+    items = [{"name": p.name,
+              "time": datetime.strptime(p.name.rsplit(".", 1)[-1], "%Y%m%d-%H%M%S-%f")
               .strftime("%Y-%m-%d %H:%M:%S")} for p in backups_for(path)]
     h.json(200, {"path": rel(path), "backups": list(reversed(items))})
 
@@ -460,15 +487,16 @@ def post_restore(h, q):
 
 
 def post_blocks_parse(h, q):
-    doc = nginx_config.parse(field(h.read_json(), "content"))
-    h.json(200, {"doc": doc})
+    nodes = parse_nginx(field(h.read_json(), "content"))
+    h.json(200, {"nodes": [asdict(node) for node in nodes]})
 
 
 def post_blocks_render(h, q):
-    doc = h.read_json().get("doc")
-    if not isinstance(doc, dict) or "children" not in doc:
-        raise ValueError("'doc' is required")
-    h.json(200, {"content": nginx_config.render(doc)})
+    raw = h.read_json().get("nodes")
+    if not isinstance(raw, list):
+        raise ValueError("'nodes' is required")
+    nodes = [Node.from_dict(item) for item in raw]
+    h.json(200, {"content": render_nginx(nodes)})
 
 
 def post_test(h, q):
@@ -485,8 +513,9 @@ def post_reload(h, q):
 
 
 def get_dns(h, q):
-    h.json(200, {**last_dns, "configured": cf is not None, "domains": sorted(load_state()["domains"]),
-                 "env_domains": ENV_DOMAINS})
+    h.json(200, {**last_dns, "configured": get_cf() is not None,
+                 "domains": sorted(load_state()["domains"]),
+                 "env_domains": sorted(tracked_domains() - set(load_state()["domains"]))})
 
 
 def post_dns_domains(h, q):
@@ -502,9 +531,56 @@ def post_dns_domains(h, q):
 
 
 def post_dns_sync(h, q):
-    if cf is None:
-        return h.json(400, {"error": "CLOUDFLARE_API_TOKEN is not set"})
+    if get_cf() is None:
+        return h.json(400, {"error": "Cloudflare API token is not set"})
     h.json(200, run_dns_sync())
+
+
+def get_settings(h, q):
+    h.json(200, {"settings": settings.describe(), "notify": notify.configured(),
+                 "ui_password_set": bool(UI_PASSWORD)})
+
+
+def put_settings(h, q):
+    settings.update(h.read_json().get("values", {}))
+    if get_cf() is not None:
+        certs.write_credentials()  # keep certbot's credentials file in step with the token
+    else:
+        certs.CREDENTIALS.unlink(missing_ok=True)  # no token, no stale copy on disk
+    get_settings(h, q)
+
+
+def post_notify_test(h, q):
+    results = notify.send("test message", "Test from nginx-autohandler. If you can read this, the channel works.")
+    if not results:
+        return h.json(400, {"error": "Set a Discord webhook or SMTP host and recipients first"})
+    h.json(200, {"results": results})
+
+
+def get_certs(h, q):
+    h.json(200, {"output": certs.list_certificates(), "staging": settings.get("acme_staging"),
+                 "email": settings.get("acme_email")})
+
+
+def post_certs_issue(h, q):
+    body = h.read_json()
+    domains = body.get("domains", [])
+    if isinstance(domains, str):
+        domains = domains.replace(",", "\n").splitlines()
+    if not isinstance(domains, list):
+        raise ValueError("'domains' must be a list")
+    staging = bool(body.get("staging", settings.get("acme_staging")))
+    names = certs.validate_domains(domains)
+    ok, output = certs.issue(names, settings.get("acme_email"), staging)
+    result = {"ok": ok, "output": output, "staging": staging, "domains": names, "dns": None}
+    if ok and get_cf() is not None:
+        add_domains(names)
+        result["dns"] = sync_domains(names)
+    notify_safe(
+        f"certificate {'issued' if ok else 'failed'} for {', '.join(names)}",
+        f"{'Issued' if ok else 'Failed'} ({'staging' if staging else 'production'}).\n\n{output}",
+    )
+    h.json(200, result)
 
 
 ROUTES = {
@@ -523,6 +599,11 @@ ROUTES = {
     ("GET", "/api/dns"): get_dns,
     ("POST", "/api/dns/domains"): post_dns_domains,
     ("POST", "/api/dns/sync"): post_dns_sync,
+    ("GET", "/api/settings"): get_settings,
+    ("PUT", "/api/settings"): put_settings,
+    ("POST", "/api/notify/test"): post_notify_test,
+    ("GET", "/api/certs"): get_certs,
+    ("POST", "/api/certs/issue"): post_certs_issue,
 }
 
 
@@ -534,12 +615,9 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not UI_PASSWORD:
         log.warning("UI_PASSWORD is empty: the editor has no login. Put an authenticating proxy in front.")
-    if cf is not None and CF_IP_SYNC:
-        log.info("Cloudflare IP sync every %ss", CF_INTERVAL)
-        threading.Thread(target=dns_loop, daemon=True).start()
-    elif cf is None:
-        log.info("Cloudflare disabled (set CLOUDFLARE_API_TOKEN)")
-    log.info("nginx-autohandler on :%s, editing %s, auto-reload=%s", UI_PORT, CONF_ROOT, AUTO_RELOAD)
+    threading.Thread(target=dns_loop, daemon=True).start()
+    threading.Thread(target=certs.renew_loop, args=(notify_safe,), daemon=True).start()
+    log.info("nginx-autohandler on :%s, editing %s", UI_PORT, CONF_ROOT)
     ThreadingHTTPServer(("0.0.0.0", UI_PORT), Handler).serve_forever()
 
 
