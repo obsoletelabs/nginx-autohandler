@@ -359,6 +359,27 @@ def issue_missing_certificates(contents):
     return issued
 
 
+FAILING_FILE = re.compile(r" in (/[^\s:]+):\d+")
+
+
+def failing_files(output):
+    """Absolute paths of the files named in nginx -t error lines ([emerg], [crit], [alert])."""
+    found = set()
+    for line in output.splitlines():
+        if "[emerg]" in line or "[crit]" in line or "[alert]" in line:
+            found.update(FAILING_FILE.findall(line))
+    return found
+
+
+def errors_in_other_files(output, touched):
+    """True when nginx -t failed, every error names a file, and none of those files is one this change touches."""
+    errors = [line for line in output.splitlines() if "[emerg]" in line or "[crit]" in line or "[alert]" in line]
+    if not errors:
+        return False
+    named = [FAILING_FILE.search(line) for line in errors]
+    return all(named) and not {match.group(1) for match in named} & touched
+
+
 def match_line_endings(current, content):
     """Write `content` with the line endings `current` already uses, so editing a CRLF file keeps it CRLF."""
     if current and "\r\n" in current and current.count("\r\n") * 2 >= current.count("\n"):
@@ -398,6 +419,7 @@ def apply_workspace(files, delete=()):
 
         diff = "".join(file_diff(rel(path), current, content) for path, current, content in changes)
         diff += "".join(file_diff(rel(path), original, None) for path, original in removals)
+        baseline_ok, _ = nginx("-t")  # is the config already broken before this change?
         for path, current, _ in changes:
             if current is not None:
                 snapshot(path)
@@ -408,6 +430,7 @@ def apply_workspace(files, delete=()):
         for path, _ in removals:
             path.unlink()
 
+        touched = {str(path) for path, _, _ in changes} | {str(path) for path, _ in removals}
         ok, output = nginx("-t")
         reload_tried = False
         reloaded = False
@@ -416,6 +439,18 @@ def apply_workspace(files, delete=()):
             reloaded, reload_out = nginx("-s", "reload")
             output = "\n".join(part for part in (output, reload_out) if part)
             ok = reloaded
+
+        if not ok and not baseline_ok and not reload_tried and errors_in_other_files(output, touched):
+            # The config was already failing before this change, and the errors are all in files this change does
+            # not touch. Rolling back would not fix anything, so keep the change and leave nginx running as it is.
+            accept_changes(True)
+            warning = ("Saved, but nginx was not reloaded: other files already fail the config test "
+                       "(" + ", ".join(sorted(failing_files(output))) + "). Fix those, then reload.")
+            report_event("⚠️ Config Saved, Not Reloaded", warning, notify.YELLOW, output, diff,
+                         changed + deleted, "applied")
+            return {"ok": True, "saved": True, "reloaded": False, "rolled_back": False, "changed": changed,
+                    "deleted": deleted, "issued": issued, "output": output, "warning": warning,
+                    "blocked_by_other_files": sorted(failing_files(output))}
 
         if not ok:
             for path, current, _ in changes:
@@ -989,6 +1024,13 @@ def get_activity(h, q):
     h.json(200, {"events": list(activity), "watching": watch is not None and settings.get("watch_config")})
 
 
+def get_certs_match(h, q):
+    """Certificates that fit the given host names: /api/certs/match?names=a.example.com,b.example.com"""
+    names = [item for part in q.get("names", [""]) for item in part.replace("\n", ",").split(",")]
+    h.json(200, {"certificates": certs.match(names), "names": [n.strip().lower() for n in names if n.strip()],
+                 "token_set": bool(settings.get("cloudflare_api_token")), "email": settings.get("acme_email")})
+
+
 def get_certs(h, q):
     output = certs.list_certificates()
     listed = certs.inventory() or certs.parse_certificates(output)
@@ -1135,6 +1177,7 @@ ROUTES = {
     ("PUT", "/api/settings"): put_settings,
     ("POST", "/api/notify/test"): post_notify_test,
     ("GET", "/api/certs"): get_certs,
+    ("GET", "/api/certs/match"): get_certs_match,
     ("POST", "/api/certs/issue"): post_certs_issue,
     ("POST", "/api/certs/reissue"): post_certs_reissue,
     ("POST", "/api/certs/selfsigned"): post_certs_selfsigned,

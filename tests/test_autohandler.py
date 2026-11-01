@@ -441,6 +441,26 @@ class WindowsFilesTests(unittest.TestCase):
         issue.assert_not_called()
 
 
+class CertificateMatchTests(unittest.TestCase):
+    def test_wildcards_cover_one_label_only(self):
+        self.assertTrue(certs.covers(["*.example.com"], "app.example.com"))
+        self.assertFalse(certs.covers(["*.example.com"], "a.b.example.com"))
+        self.assertFalse(certs.covers(["*.example.com"], "example.com"))
+        self.assertTrue(certs.covers(["example.com"], "EXAMPLE.com"))
+
+    def test_best_fit_comes_first_and_underscore_is_ignored(self):
+        entries = [
+            {"name": "other", "domains": ["x.test"], "valid": True, "days_left": 80},
+            {"name": "wild", "domains": ["*.example.com", "example.com"], "valid": True, "days_left": 20},
+            {"name": "old", "domains": ["*.example.com"], "valid": False, "days_left": -3},
+        ]
+        with mock.patch.object(certs, "inventory", return_value=entries):
+            ranked = certs.match(["app.example.com", "_", "example.com"])
+        self.assertEqual([item["name"] for item in ranked], ["wild", "old", "other"])
+        self.assertEqual(ranked[0]["covers"], ["app.example.com", "example.com"])
+        self.assertEqual(ranked[1]["missing"], ["example.com"])
+
+
 class IpConfirmationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -843,6 +863,30 @@ class WorkspaceApplyTests(unittest.TestCase):
         self.assertEqual(result["changed"], ["nginx.conf"])
         self.assertEqual(self.main.read_text(encoding="utf-8"), changed)
         self.nginx.assert_any_call("-s", "reload")
+
+    def test_a_change_is_kept_when_other_files_were_already_broken(self):
+        other_path = "/etc/nginx/conf.d/broken.conf"
+        failing = f'nginx: [emerg] unknown directive "bogus" in {other_path}:1\nnginx: configuration file test failed'
+        self.nginx.return_value = (False, failing)
+        result = server.apply_workspace({"nginx.conf": "events {\n    worker_connections 4096;\n}\n"})
+        self.assertTrue(result["ok"] and result["saved"])
+        self.assertFalse(result["reloaded"] or result["rolled_back"])
+        self.assertIn("other files already fail", result["warning"])
+        self.assertIn("worker_connections 4096", self.main.read_text(encoding="utf-8"))
+        self.assertNotIn(("-s", "reload"), [call.args for call in self.nginx.call_args_list])
+
+    def test_a_change_that_breaks_its_own_file_is_still_rolled_back(self):
+        failing = f'nginx: [emerg] unknown directive "bogus" in {self.main.as_posix()}:2'
+        self.nginx.return_value = (False, failing)
+        result = server.apply_workspace({"nginx.conf": "events {\n    bogus 1;\n}\n"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rolled_back"])
+        self.assertEqual(self.main.read_text(encoding="utf-8"), self.original)
+
+    def test_same_line_comments_stay_on_their_line(self):
+        text = "server {  # head\n    listen 80;  # port\n    # own line\n    deny all;  # no\n}\n"
+        self.assertEqual(render(parse(text, "a.conf")), text)
+
 
     def test_rejected_test_restores_every_file(self):
         self.nginx.return_value = (False, "unknown directive")

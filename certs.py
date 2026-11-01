@@ -76,6 +76,31 @@ def validate_domains(domains):
     return sorted(set(clean))
 
 
+def covers(patterns, name):
+    """True when a certificate valid for `patterns` (host names, *.wildcards) is valid for `name`."""
+    name = name.strip().lower()
+    for pattern in patterns:
+        pattern = pattern.strip().lower()
+        if pattern == name:
+            return True
+        if pattern.startswith("*.") and "." in name and name.split(".", 1)[1] == pattern[2:] and not name.startswith("*."):
+            return True
+    return False
+
+
+def match(names):
+    """Certificates ranked by how many of `names` they cover. Each entry says what it covers and what it misses.
+
+    Best first: all names covered, then valid before expired, then the longest remaining life."""
+    names = [name.strip().lower() for name in names if name and name.strip() and name.strip() != "_"]
+    ranked = []
+    for entry in inventory():
+        covered = [name for name in names if covers(entry.get("domains") or [], name)]
+        ranked.append({**entry, "covers": covered, "missing": [name for name in names if name not in covered]})
+    ranked.sort(key=lambda item: (-len(item["covers"]), not item.get("valid"), -(item.get("days_left") or -9999)))
+    return ranked
+
+
 def cert_name(domains):
     first = domains[0].replace("*.", "wildcard.")
     return first

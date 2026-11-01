@@ -121,14 +121,26 @@ def parse(text: str, path: str = "config") -> list:
 
 def render(nodes: list, depth: int = 0) -> str:
     lines = []
+    last_directive = None  # a comment that was on the same line as this directive stays on that line
     for node in nodes:
         indent = "    " * depth
         if node.kind == "comment":
-            lines.append(indent + node.text)
+            if last_directive is not None and node.line is not None and node.line == last_directive.line:
+                lines[-1] += "  " + node.text
+            else:
+                lines.append(indent + node.text)
+            last_directive = None
             continue
         header = " ".join([node.name, *node.args])
         if node.kind == "block":
-            lines.extend([indent + header + " {", render(node.children, depth + 1).rstrip("\n"), indent + "}"])
+            children = node.children
+            opening = indent + header + " {"
+            if children and children[0].kind == "comment" and children[0].line is not None and children[0].line == node.line:
+                opening += "  " + children[0].text  # server {  # comment
+                children = children[1:]
+            lines.extend([opening, render(children, depth + 1).rstrip("\n"), indent + "}"])
+            last_directive = None
         else:
             lines.append(indent + header + ";")
+            last_directive = node
     return "\n".join(line for line in lines if line != "") + ("\n" if lines else "")
