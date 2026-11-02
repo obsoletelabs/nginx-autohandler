@@ -63,6 +63,17 @@ CATALOG = [
      "summary": "Keep copies of the app's answers so repeat visits are served by nginx itself.",
      "fields": [field("valid", "Keep answers for", "text", "10m", help="For example 30s, 10m, 1h"),
                 field("size", "Cache size", "text", "1g", help="For example 500m or 2g")]},
+    {"id": "ip_block", "title": "IP block list", "group": "Protection", "icon": "🚫",
+     "summary": "Turn away listed addresses or networks (403) and let everyone else in.",
+     "fields": [field("deny", "Blocked addresses or networks (one per line)", "lines", "203.0.113.0/24")]},
+    {"id": "bot_block", "title": "Block unwanted bots", "group": "Protection", "icon": "🤖",
+     "summary": "Refuse requests whose browser name matches words you list (uses an nginx map).",
+     "fields": [field("agents", "Words in the user agent (one per line)", "lines", "semrushbot\nahrefsbot\nmj12bot\ndotbot", help="Matched without caring about capitals.")]},
+    {"id": "real_ip", "title": "Real visitor address", "group": "Web", "icon": "🪪",
+     "summary": "Behind Cloudflare or another proxy? Log and limit by the visitor's address, not the proxy's.",
+     "fields": [field("preset", "Proxy", "select", "cloudflare", options=[["cloudflare", "Cloudflare"], ["custom", "My own proxy (list below)"]]),
+                field("proxies", "Trusted proxy addresses (custom only, one per line)", "lines", ""),
+                field("header", "Header carrying the visitor address", "select", "CF-Connecting-IP", options=[["CF-Connecting-IP", "CF-Connecting-IP (Cloudflare)"], ["X-Forwarded-For", "X-Forwarded-For"], ["X-Real-IP", "X-Real-IP"]])]},
     {"id": "limits", "title": "Size and timeouts", "group": "Speed", "icon": "📏",
      "summary": "Largest upload and how long to wait for the app.",
      "fields": [field("max_body", "Largest upload", "text", "100m", help="For example 10m, 1g, 0 for no limit"),
@@ -163,6 +174,46 @@ def build_ip_access(v, ctx):
     return "", "\n".join(lines) + "\ndeny all;"
 
 
+CLOUDFLARE_RANGES = ["173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+                     "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+                     "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22", "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
+                     "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32"]
+AGENT = re.compile(r"^[A-Za-z0-9 ._-]{2,40}$")
+
+
+def build_ip_block(v, ctx):
+    lines = []
+    for item in v["deny"]:
+        if not IP.match(item):
+            raise ValueError(f"not an IP address or network: {item}")
+        lines.append(f"deny {item};")
+    if not lines:
+        raise ValueError("list at least one address to block")
+    return "", "\n".join(lines) + "\nallow all;"
+
+
+def build_bot_block(v, ctx):
+    words = []
+    for item in v["agents"]:
+        if not AGENT.match(item):
+            raise ValueError(f"use letters, digits, spaces, dots and dashes only: {item}")
+        words.append(item.lower().replace(".", "[.]"))
+    if not words:
+        raise ValueError("list at least one word")
+    name = "bot_" + ctx["slug"]
+    return (f'map $http_user_agent ${name} {{\n    default 0;\n    "~*({"|".join(words)})" 1;\n}}', f"if (${name}) {{ return 403; }}")
+
+
+def build_real_ip(v, ctx):
+    proxies = CLOUDFLARE_RANGES if v["preset"] == "cloudflare" else v["proxies"]
+    if not proxies:
+        raise ValueError("list at least one trusted proxy address")
+    for item in proxies:
+        if not IP.match(item):
+            raise ValueError(f"not an IP address or network: {item}")
+    return "", "\n".join([f"set_real_ip_from {item};" for item in proxies] + [f"real_ip_header {v['header']};", "real_ip_recursive on;"])
+
+
 def build_security_headers(v, ctx):
     lines = ['add_header X-Content-Type-Options "nosniff" always;', 'add_header X-Frame-Options "SAMEORIGIN" always;',
              'add_header Referrer-Policy "strict-origin-when-cross-origin" always;']
@@ -236,7 +287,7 @@ BUILDERS = {
     "rate_limit": build_rate_limit, "conn_limit": build_conn_limit, "basic_auth": build_basic_auth,
     "ip_access": build_ip_access, "security_headers": build_security_headers, "cors": build_cors,
     "compression": build_compression, "cache": build_cache, "limits": build_limits,
-    "load_balance": build_load_balance, "error_page": build_error_page, "access_log": build_access_log,
+    "ip_block": build_ip_block, "bot_block": build_bot_block, "real_ip": build_real_ip, "load_balance": build_load_balance, "error_page": build_error_page, "access_log": build_access_log,
 }
 
 

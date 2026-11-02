@@ -98,7 +98,10 @@ class FeatureTests(unittest.TestCase):
                ("cache", {"size": "big"}), ("limits", {"max_body": "1g;"}), ("cors", {"origin": "https://a.com\n;evil"}),
                ("ip_access", {"allow": "1.2.3.4; deny all"}), ("load_balance", {"servers": "host only"}),
                ("load_balance", {"servers": "a:80 evil"}), ("basic_auth", {"realm": 'x"; y', "username": "a", "password": "p"}),
-               ("compression", {"level": 12}), ("security_headers", {"preset": "nope"})]
+               ("compression", {"level": 12}), ("security_headers", {"preset": "nope"}),
+               ("bot_block", {"agents": 'x"; return 200; #'}), ("bot_block", {"agents": ""}), ("ip_block", {"deny": "1.2.3.4; allow all"}),
+               ("real_ip", {"preset": "custom", "proxies": ""}), ("real_ip", {"preset": "custom", "proxies": "10.0.0.1\nbogus"}),
+               ("real_ip", {"header": "X-Evil"})]
         for feature_id, values in bad:
             with self.assertRaises(ValueError, msg=feature_id):
                 features.apply(SITE, 0, feature_id, values)
