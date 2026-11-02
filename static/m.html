@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#12151a">
+  <title>nginx autohandler · phone</title>
+  <link rel="icon" href="/static/logo-light.png" type="image/png">
+  <link rel="stylesheet" href="/static/ham.css">
+  <link rel="stylesheet" href="/static/m.css">
+  <script src="/static/ham.js"></script>
+  <script src="/static/m.js" defer></script>
+</head>
+<body>
+  <header class="mtop">
+    <img src="/static/logo-light.png" alt="" width="28" height="28">
+    <h1 id="title">Status</h1>
+    <span class="grow"></span>
+    <button class="ghost" id="theme" aria-label="Switch light or dark">🌗</button>
+    <a class="btn ghost" href="/?desktop=1" aria-label="Open the full editor">🖥</a>
+  </header>
+  <main id="main"></main>
+  <nav class="mnav" aria-label="Sections">
+    <a href="#/status" data-page="status"><i>📊</i><span>Status</span></a>
+    <a href="#/sites" data-page="sites"><i>🧩</i><span>Sites</span></a>
+    <a href="#/certs" data-page="certs"><i>🔐</i><span>Certs</span></a>
+    <a href="#/tasks" data-page="tasks"><i>⏳</i><span>Tasks</span><em id="taskBadge" hidden>0</em></a>
+    <a href="#/logs" data-page="logs"><i>📜</i><span>Logs</span></a>
+  </nav>
+</body>
+</html>

@@ -1261,8 +1261,24 @@ def site_change(site_id, change):
     return apply_workspace({path: new_text}, (), {})
 
 
+def live_files(files):
+    """The set of config files nginx would load right now."""
+    parsed = {}
+    for name, text in files.items():
+        try:
+            parsed[name] = parse_nginx(text)
+        except ValueError:
+            continue
+    return set(overview.enabled_graph(CONF_ROOT, parsed))
+
+
 def get_sites(h, q):
-    h.json(200, {"sites": sites.list_sites(explore.read_all(CONF_ROOT))})
+    files = explore.read_all(CONF_ROOT)
+    live = live_files(files)
+    found = sites.list_sites(files)
+    for item in found:
+        item["enabled"] = item["file"] in live
+    h.json(200, {"sites": found})
 
 
 def post_sites_update(h, q):
@@ -1358,13 +1374,14 @@ def get_search(h, q):
 
 def get_topology(h, q):
     files = explore.read_all(CONF_ROOT)
-    parsed = {}
-    for name, text in files.items():
-        try:
-            parsed[name] = parse_nginx(text)
-        except ValueError:
-            continue
-    h.json(200, explore.topology(files, set(overview.enabled_graph(CONF_ROOT, parsed))))
+    h.json(200, explore.topology(files, live_files(files)))
+
+
+def get_clock(h, q):
+    """The server's clock and zone, so pages can say "5 min ago" about the server's local timestamps."""
+    local = time.localtime()
+    h.json(200, {"epoch": time.time(), "now": time.strftime("%Y-%m-%d %H:%M:%S", local), "utc_offset": local.tm_gmtoff or 0,
+                 "zone": time.strftime("%Z", local)})
 
 
 def get_timeline(h, q):
@@ -1392,6 +1409,7 @@ ROUTES = {
     ("GET", "/api/search"): get_search,
     ("GET", "/api/topology"): get_topology,
     ("GET", "/api/timeline"): get_timeline,
+    ("GET", "/api/clock"): get_clock,
     ("GET", "/api/palette"): get_palette,
     ("GET", "/api/recipes"): get_recipes,
     ("POST", "/api/recipes"): post_recipes,

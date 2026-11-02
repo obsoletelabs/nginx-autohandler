@@ -10,6 +10,13 @@
     // Theme before first paint: the saved choice, or the system setting when none is saved.
     try { var savedTheme = localStorage.getItem("nginx-autohandler-theme"); if (savedTheme) document.documentElement.dataset.theme = savedTheme; } catch (error) { /* storage blocked: system theme */ }
   </script>
+  <script>
+    // Phones get the phone view unless they asked for the full editor (/?desktop=1).
+    try {
+      if (/[?&]desktop=1/.test(location.search)) sessionStorage.setItem("ham-desktop", "1");
+      if (!sessionStorage.getItem("ham-desktop") && matchMedia("(max-width: 700px) and (pointer: coarse)").matches) location.replace("/m");
+    } catch (error) { /* storage blocked: stay on the editor */ }
+  </script>
   <link rel="stylesheet" href="/static/theme.css">
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/interaction.css">
@@ -35,6 +42,8 @@
   <script src="/static/basic2.js" defer></script>
   <script src="/static/library.js" defer></script>
   <script src="/static/modals.js" defer></script>
+  <script src="/static/ham.js" defer></script>
+  <script src="/static/palette.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -51,6 +60,7 @@
       <button id="btnReload" class="quiet" title="Test, then reload nginx">Reload nginx</button>
     </div>
     <div class="tool-group">
+      <button id="btnLab" class="quiet" title="Traffic, topology, search, templates and the timeline (Ctrl+K opens the command palette)" onclick="location.href='/lab'">Lab</button>
       <button id="btnCerts" class="quiet" title="Issue, upload and renew certificates">Certificates</button>
       <button id="btnDns" class="quiet" title="Cloudflare DNS and dynamic IP">DNS</button>
       <button id="btnGit" class="quiet" title="Sync the config with a git repository">Git sync</button>

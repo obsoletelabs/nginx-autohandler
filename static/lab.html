@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Lab · obsoletelabs nginx autohandler</title>
+  <link rel="icon" href="/static/logo-light.png" type="image/png">
+  <link rel="stylesheet" href="/static/ham.css">
+  <link rel="stylesheet" href="/static/lab.css">
+  <script src="/static/ham.js"></script>
+  <script src="/static/palette.js" defer></script>
+  <script src="/static/lab.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <nav class="rail" aria-label="Lab sections">
+      <a class="brand" href="/lab#/status"><img src="/static/logo-light.png" alt="" width="30" height="30"><span>nginx <b>Lab</b></span></a>
+      <a href="#/status" data-page="status"><i>📊</i><span>Status</span></a>
+      <a href="#/sites" data-page="sites"><i>🧩</i><span>Sites</span></a>
+      <a href="#/topology" data-page="topology"><i>🕸</i><span>Topology</span></a>
+      <a href="#/search" data-page="search"><i>🔎</i><span>Search</span></a>
+      <a href="#/templates" data-page="templates"><i>✨</i><span>Templates</span></a>
+      <a href="#/timeline" data-page="timeline"><i>🕓</i><span>Timeline</span></a>
+      <span class="spacer"></span>
+      <a href="/?desktop=1"><i>✏️</i><span>Editor</span></a>
+      <a href="/m"><i>📱</i><span>Phone view</span></a>
+      <button class="ghost" id="palette" title="Command palette (Ctrl+K)"><i>⌘</i><span>Ctrl K</span></button>
+      <button class="ghost" id="theme"><i>🌗</i><span>Theme</span></button>
+    </nav>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</body>
+</html>

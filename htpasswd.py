@@ -19,7 +19,7 @@ _lock = threading.Lock()
 
 
 def folder():
-    return settings.DATA_DIR / "htpasswd"
+    return (settings.DATA_DIR / "htpasswd").resolve()
 
 
 def path_for(slug):
