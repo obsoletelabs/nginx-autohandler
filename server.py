@@ -32,6 +32,9 @@ from urllib.parse import parse_qs, urlparse
 
 import certs
 import cloudflare
+import explore
+import features
+import htpasswd
 import ipsync
 import gitsync
 import logs
@@ -39,7 +42,11 @@ import notify
 import overview
 import recipes
 import settings
+import sites
+import stats
 import tasks
+import templates
+import timeline
 import watcher
 import whoami
 import workshop
@@ -69,6 +76,8 @@ CONTENT_TYPES = {
     ".ico": "image/x-icon",
     ".webp": "image/webp",
 }
+# Pages served from static/: the editor, the phone view and the Lab (stats, topology, search, templates).
+PAGES = {"/": "index.html", "/m": "m.html", "/lab": "lab.html"}
 ERROR_STATUS = [
     (PermissionError, 403),
     (FileNotFoundError, 404),
@@ -539,7 +548,9 @@ def report_event(title, message, color, detail="", diff="", files=(), kind="info
     files = list(files)
     if files:
         message = f"{message}\nFiles: {', '.join(files)}"
-    activity.appendleft({"time": now(), "kind": kind, "title": title, "message": message, "files": files})
+    event = {"time": now(), "kind": kind, "title": title, "message": message, "files": files}
+    activity.appendleft(event)
+    timeline.record(event)
     notify.fire(notify.config_event, title, message, color, detail, diff)
 
 
@@ -708,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         url = urlparse(self.path)
-        if method == "GET" and (url.path == "/" or url.path.startswith("/static/")):
+        if method == "GET" and (url.path in PAGES or url.path.startswith("/static/")):
             return self.static(url.path)
         # A custom header forces browsers to preflight cross-site writes, which blocks CSRF.
         if method != "GET" and self.headers.get("X-Requested-With") != "nginx-autohandler":
@@ -726,7 +737,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json(500, {"error": "internal error, see container logs"})
 
     def static(self, url_path):
-        name = "index.html" if url_path == "/" else url_path[len("/static/"):]
+        name = PAGES[url_path] if url_path in PAGES else url_path[len("/static/"):]
         path = (STATIC_DIR / name).resolve()
         if STATIC_DIR.resolve() not in path.parents or not path.is_file():
             return self.json(404, {"error": "not found"})
@@ -1237,8 +1248,150 @@ def post_certs_delete(h, q):
     h.json(200, {"ok": True, "message": f"Certificate '{name}' deleted."})
 
 
+
+# ---------------------------------------------------------------- sites, features, templates, stats (experimental)
+
+def site_change(site_id, change):
+    """Run change(text, index) on the file holding the site, then apply it like the editor does. Returns the apply result."""
+    path, index = sites.split_id(site_id)
+    target = safe_path(path)
+    if not target.is_file():
+        raise FileNotFoundError(f"{path} does not exist")
+    new_text = change(read_exact(target), index)
+    return apply_workspace({path: new_text}, (), {})
+
+
+def get_sites(h, q):
+    h.json(200, {"sites": sites.list_sites(explore.read_all(CONF_ROOT))})
+
+
+def post_sites_update(h, q):
+    body = h.read_json()
+    names = body.get("names")
+    forward = body.get("forward")
+    if names is None and forward is None:
+        raise ValueError("nothing to change")
+    h.json(200, site_change(field(body, "id"), lambda text, index: sites.update(text, index, names, forward)))
+
+
+def post_sites_https(h, q):
+    body = h.read_json()
+    cert, key = field(body, "certificate"), field(body, "key")
+    redirect = bool(body.get("redirect", True))
+    h.json(200, site_change(field(body, "id"), lambda text, index: sites.enable_https(text, index, cert, key, redirect)))
+
+
+def post_sites_https_off(h, q):
+    h.json(200, site_change(field(h.read_json(), "id"), sites.disable_https))
+
+
+def get_features(h, q):
+    h.json(200, {"features": features.catalog()})
+
+
+def post_features_apply(h, q):
+    body = h.read_json()
+    feature = field(body, "feature")
+    values = body.get("values") or {}
+    if not isinstance(values, dict):
+        raise ValueError("'values' must be an object")
+    if feature == "basic_auth":
+        site_id = field(body, "id")
+        slug = next((item["slug"] for item in sites.list_sites(explore.read_all(CONF_ROOT)) if item["id"] == site_id), None)
+        if slug is None:
+            raise ValueError("that site no longer exists; reload the page")
+        if values.get("password") or not htpasswd.users(slug):
+            htpasswd.set_user(slug, str(values.get("username", "")), str(values.get("password", "")))
+    h.json(200, site_change(field(body, "id"), lambda text, index: features.apply(text, index, feature, values)))
+
+
+def post_features_disable(h, q):
+    body = h.read_json()
+    feature = field(body, "feature")
+    h.json(200, site_change(field(body, "id"), lambda text, index: features.disable(text, index, feature)))
+
+
+def get_htpasswd(h, q):
+    slug = q.get("slug", [""])[0]
+    h.json(200, {"users": htpasswd.users(slug)})
+
+
+def post_htpasswd_remove(h, q):
+    body = h.read_json()
+    htpasswd.remove_user(field(body, "slug"), field(body, "user"))
+    h.json(200, {"ok": True})
+
+
+def get_templates(h, q):
+    h.json(200, {"templates": templates.catalog()})
+
+
+def post_templates_create(h, q):
+    body = h.read_json()
+    values = body.get("values") or {}
+    if not isinstance(values, dict):
+        raise ValueError("'values' must be an object")
+    main = CONF_ROOT / "nginx.conf"
+    existing = {"nginx.conf": read_exact(main)} if main.is_file() else {}
+    built = templates.build(field(body, "template"), values, existing)
+    for path in built["files"]:
+        if path != "nginx.conf" and safe_path(path).exists():
+            raise FileExistsError(f"{path} already exists. Pick another domain name or delete that file first.")
+    result = apply_workspace(built["files"], (), {})
+    result["note"] = built["note"]
+    result["created"] = [path for path in built["files"] if path != "nginx.conf"]
+    h.json(200, result)
+
+
+def get_stats(h, q):
+    try:
+        hours = int(q.get("hours", ["24"])[0])
+    except ValueError:
+        raise ValueError("hours must be a number")
+    h.json(200, stats.report(q.get("log", ["nginx/access.log"])[0], hours))
+
+
+def get_search(h, q):
+    h.json(200, explore.search(explore.read_all(CONF_ROOT), q.get("q", [""])[0], q.get("regex", ["0"])[0] == "1",
+                               q.get("case", ["0"])[0] == "1"))
+
+
+def get_topology(h, q):
+    files = explore.read_all(CONF_ROOT)
+    parsed = {}
+    for name, text in files.items():
+        try:
+            parsed[name] = parse_nginx(text)
+        except ValueError:
+            continue
+    h.json(200, explore.topology(files, set(overview.enabled_graph(CONF_ROOT, parsed))))
+
+
+def get_timeline(h, q):
+    try:
+        limit = int(q.get("limit", ["200"])[0])
+    except ValueError:
+        raise ValueError("limit must be a number")
+    h.json(200, {"events": timeline.recent(limit)})
+
+
 ROUTES = {
     ("GET", "/api/config"): get_config,
+    ("GET", "/api/sites"): get_sites,
+    ("POST", "/api/sites/update"): post_sites_update,
+    ("POST", "/api/sites/https"): post_sites_https,
+    ("POST", "/api/sites/https/off"): post_sites_https_off,
+    ("GET", "/api/features"): get_features,
+    ("POST", "/api/features/apply"): post_features_apply,
+    ("POST", "/api/features/disable"): post_features_disable,
+    ("GET", "/api/htpasswd"): get_htpasswd,
+    ("POST", "/api/htpasswd/remove"): post_htpasswd_remove,
+    ("GET", "/api/templates"): get_templates,
+    ("POST", "/api/templates/create"): post_templates_create,
+    ("GET", "/api/stats"): get_stats,
+    ("GET", "/api/search"): get_search,
+    ("GET", "/api/topology"): get_topology,
+    ("GET", "/api/timeline"): get_timeline,
     ("GET", "/api/palette"): get_palette,
     ("GET", "/api/recipes"): get_recipes,
     ("POST", "/api/recipes"): post_recipes,
