@@ -82,8 +82,10 @@ def parse(text: str, path: str = "config") -> list:
     tokens = lex(text.lstrip("\ufeff"), path)
     index = 0
 
-    def body(nested=False, depth=0):
-        nonlocal index
+    closing = 0  # line of the last '}' read
+
+    def body(nested=False, depth=0, open_line=None):
+        nonlocal index, closing
         if depth > 100:
             raise ParseError("blocks nested more than 100 levels", path=path)
         nodes, words, start_line = [], [], 1
@@ -92,7 +94,11 @@ def parse(text: str, path: str = "config") -> list:
             index += 1
             if token.kind == "comment":
                 # Comments between arguments are legal. Keep them before the directive.
-                nodes.append(Node(kind="comment", text=token.text, line=token.line))
+                before = nodes[-1] if nodes else None
+                inline = not words and (
+                    (before is None and open_line == token.line)
+                    or (before is not None and before.kind != "comment" and before.end_line == token.line))
+                nodes.append(Node(kind="comment", text=token.text, line=token.line, inline=inline))
             elif token.kind == "word":
                 if not words:
                     start_line = token.line
@@ -100,15 +106,17 @@ def parse(text: str, path: str = "config") -> list:
             elif token.kind in (";", "{"):
                 if not words:
                     raise ParseError(f"unexpected '{token.text}'", token.line, path)
-                children = body(True, depth + 1) if token.kind == "{" else []
+                children = body(True, depth + 1, token.line) if token.kind == "{" else []
                 nodes.append(Node(kind="block" if token.kind == "{" else "directive",
-                                  name=words[0], args=words[1:], children=children, line=start_line))
+                                  name=words[0], args=words[1:], children=children, line=start_line,
+                                  end_line=closing if token.kind == "{" else token.line))
                 words = []
             elif token.kind == "}":
                 if words:
                     raise ParseError("missing ';' or '{' before '}'", token.line, path)
                 if not nested:
                     raise ParseError("unexpected '}'", token.line, path)
+                closing = token.line
                 return nodes
         if words:
             raise ParseError("missing ';' or '{' at end of file", start_line, path)
@@ -121,26 +129,25 @@ def parse(text: str, path: str = "config") -> list:
 
 def render(nodes: list, depth: int = 0) -> str:
     lines = []
-    last_directive = None  # a comment that was on the same line as this directive stays on that line
+    trailing = False  # the last line written can take a comment that was on the same line in the source
     for node in nodes:
         indent = "    " * depth
         if node.kind == "comment":
-            if last_directive is not None and node.line is not None and node.line == last_directive.line:
+            if node.inline and trailing:
                 lines[-1] += "  " + node.text
             else:
                 lines.append(indent + node.text)
-            last_directive = None
+            trailing = False
             continue
         header = " ".join([node.name, *node.args])
         if node.kind == "block":
             children = node.children
             opening = indent + header + " {"
-            if children and children[0].kind == "comment" and children[0].line is not None and children[0].line == node.line:
+            if children and children[0].kind == "comment" and children[0].inline:
                 opening += "  " + children[0].text  # server {  # comment
                 children = children[1:]
             lines.extend([opening, render(children, depth + 1).rstrip("\n"), indent + "}"])
-            last_directive = None
         else:
             lines.append(indent + header + ";")
-            last_directive = node
+        trailing = True
     return "\n".join(line for line in lines if line != "") + ("\n" if lines else "")

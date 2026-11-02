@@ -25,6 +25,8 @@ class Node:
     text: str = ""
     id: str = field(default_factory=new_id)
     line: int | None = None
+    inline: bool = False  # a comment written on the same line as the directive or block before it
+    end_line: int | None = None  # line of the closing ; or }, so a comment after it stays there
 
     @classmethod
     def from_dict(cls, value, depth=0, seen=None):
@@ -33,7 +35,7 @@ class Node:
             raise ModelError("Blocks are nested too deeply")
         if not isinstance(value, dict):
             raise ModelError("Each node must be an object")
-        allowed = {"kind", "name", "args", "children", "text", "id", "line"}
+        allowed = {"kind", "name", "args", "children", "text", "id", "line", "end_line", "inline"}
         if set(value) - allowed:
             raise ModelError(f"Unknown node fields: {sorted(set(value) - allowed)}")
         kind = value.get("kind")
@@ -70,7 +72,12 @@ class Node:
         line = value.get("line")
         if line is not None and (type(line) is not int or line < 1):
             raise ModelError("Source line must be a positive integer")
-        return cls(kind=kind, name=name, args=args, text=text, id=node_id, line=line,
+        if not isinstance(value.get("inline", False), bool):
+            raise ModelError("Comment placement must be true or false")
+        end_line = value.get("end_line")
+        if end_line is not None and (type(end_line) is not int or end_line < 1):
+            raise ModelError("Source end line must be a positive integer")
+        return cls(kind=kind, name=name, args=args, text=text, id=node_id, line=line, end_line=end_line, inline=value.get("inline", False),
                    children=[cls.from_dict(child, depth + 1, seen) for child in children])
 
 

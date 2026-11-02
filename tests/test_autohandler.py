@@ -27,8 +27,10 @@ import certs  # noqa: E402
 import ipsync  # noqa: E402
 import logs  # noqa: E402
 import notify  # noqa: E402
+import recipes  # noqa: E402
 import server  # noqa: E402
 import settings  # noqa: E402
+import tasks  # noqa: E402
 import watcher  # noqa: E402
 import whoami  # noqa: E402
 from nginx_model import parse, render  # noqa: E402
@@ -417,6 +419,14 @@ class WindowsFilesTests(unittest.TestCase):
         self.assertTrue(comments)
         self.assertTrue(all("\r" not in comment for comment in comments))
 
+    def test_comments_stay_on_the_line_they_were_written_on(self):
+        text = ("http {  # head\n    upstream app {  # pool\n        server 10.0.0.1:80;  # one\n    }  # end pool\n"
+                "    server {\n        listen 443 ssl;  # Listen on https\n        location / {\n"
+                "            proxy_pass http://app;  # fwd\n            # own line\n        }  # end location\n"
+                "        if ($x) {\n            return 403;\n        }  # inline block\n    }\n}\n")
+        self.assertEqual(render(parse(text)), text)
+        self.assertEqual(render(parse("a { b; } # c\nd; # e\n")), "a {\n    b;\n}  # c\nd;  # e\n")
+
     def test_saving_keeps_crlf(self):
         self.assertEqual(server.match_line_endings("a\r\nb\r\n", "x\ny\n"), "x\r\ny\r\n")
         self.assertEqual(server.match_line_endings("a\nb\n", "x\ny\n"), "x\ny\n")
@@ -791,6 +801,133 @@ class ExternalCertificateTests(unittest.TestCase):
         with self.assertRaises(certs.CertError):
             certs.delete_certificate("site-a")
         self.assertTrue((self.external / "site-a" / "fullchain.pem").exists())
+
+
+class CertificateFolderTests(ExternalCertificateTests):
+    def test_folder_info_reads_a_pair_and_rejects_other_places(self):
+        self.make_pair(self.external / "site-a", "fullchain.pem", "privkey.pem", "a.example.com")
+        info = certs.folder_info(str(self.external / "site-a"))
+        self.assertTrue(info["found"])
+        self.assertEqual(info["domains"], ["a.example.com"])
+        self.assertTrue(info["cert_path"].endswith("fullchain.pem"))
+        self.assertTrue(info["key_path"].endswith("privkey.pem"))
+        self.assertTrue(info["valid"])
+        with self.assertRaises(certs.CertError):
+            certs.folder_info(str(pathlib.Path(self.tmp.name)))
+        with self.assertRaises(certs.CertError):
+            certs.folder_info("")
+
+    def test_empty_folder_says_what_is_expected(self):
+        (self.external / "empty").mkdir()
+        info = certs.folder_info(str(self.external / "empty"))
+        self.assertFalse(info["found"])
+        self.assertIn("fullchain.pem", info["error"])
+
+
+class TasksAndBusyTests(unittest.TestCase):
+    def test_tasks_record_running_done_and_failed(self):
+        with tasks.track("test", "Running one") as task:
+            snap = tasks.snapshot()
+            self.assertEqual(snap["tasks"][0]["state"], "running")
+            self.assertGreaterEqual(snap["running"], 1)
+        self.assertEqual(task.data["state"], "done")
+        with self.assertRaises(RuntimeError):
+            with tasks.track("test", "Failing one") as failing:
+                raise RuntimeError("boom")
+        self.assertEqual(failing.data["state"], "failed")
+        self.assertEqual(failing.data["error"], "boom")
+        with tasks.track("test", "Reported failure") as reported:
+            reported.fail("no good")
+        self.assertEqual(reported.data["state"], "failed")
+
+    def test_a_second_certificate_request_is_refused_while_one_runs(self):
+        with certs.exclusive():
+            with self.assertRaises(certs.CertBusy):
+                with certs.exclusive():
+                    pass
+        with certs.exclusive():
+            pass
+        self.assertEqual([status for kind, status in server.ERROR_STATUS if kind is certs.CertBusy], [409])
+
+
+class CertificateChoiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for patcher in (mock.patch.object(certs, "CONFIG_DIR", str(pathlib.Path(self.tmp.name) / "le")),
+                        mock.patch.object(server, "can_issue_certificates", return_value=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def site(self, lineage, names):
+        return (f"server {{ server_name {names}; "
+                f"ssl_certificate /etc/letsencrypt/live/{lineage}/fullchain.pem; "
+                f" ssl_certificate_key /etc/letsencrypt/live/{lineage}/privkey.pem; }}")
+
+    def test_a_certificate_named_after_its_server_name_just_gets_the_server_names(self):
+        resolved, ask = server.resolve_certificates([self.site("app.example.com", "app.example.com www.example.com")], {})
+        self.assertEqual(resolved, {"app.example.com": ["app.example.com", "www.example.com"]})
+        self.assertEqual(ask, [])
+
+    def test_a_certificate_named_otherwise_asks_what_it_should_contain(self):
+        resolved, ask = server.resolve_certificates([self.site("example.net", "a.example.net b.example.net")], {})
+        self.assertEqual(resolved, {})
+        self.assertEqual(ask[0]["lineage"], "example.net")
+        self.assertEqual(ask[0]["suggestions"][:2], ["example.net", "*.example.net"])
+        self.assertIn("a.example.net", ask[0]["suggestions"])
+
+    def test_the_answer_is_validated_and_used(self):
+        text = self.site("example.net", "a.example.net")
+        resolved, ask = server.resolve_certificates([text], {"example.net": ["*.example.net", "example.net"]})
+        self.assertEqual(resolved, {"example.net": ["*.example.net", "example.net"]})
+        self.assertEqual(ask, [])
+        with self.assertRaises(certs.CertError):
+            server.resolve_certificates([text], {"example.net": ["not a host"]})
+
+    def test_without_anyone_to_answer_nothing_is_asked_or_issued(self):
+        resolved, ask = server.resolve_certificates([self.site("example.net", "a.example.net")], None)
+        self.assertEqual((resolved, ask), ({}, []))
+
+    def test_apply_stops_with_a_question_before_writing_anything(self):
+        text = self.site("example.net", "a.example.net")
+        with mock.patch.object(certs, "issue") as issue:
+            result = server.apply_workspace({"asks-first.conf": text}, (), {})
+        issue.assert_not_called()
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["saved"])
+        self.assertEqual(result["needs_certificates"][0]["lineage"], "example.net")
+        self.assertFalse((server.CONF_ROOT / "asks-first.conf").exists())
+
+
+class RecipeLibraryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.object(recipes, "FILE", lambda: pathlib.Path(self.tmp.name) / "recipes.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_save_edit_list_and_delete(self):
+        saved = recipes.save({"title": "Security headers", "scope": "server", "hint": "Common headers",
+                              "source": "add_header X-Frame-Options DENY; add_header X-Content-Type-Options nosniff;"})
+        self.assertTrue(saved["custom"])
+        recipes.save({**saved, "title": "Security headers 2"})
+        listed = recipes.listing()
+        self.assertEqual([item["title"] for item in listed], ["Security headers 2"])
+        recipes.delete(saved["id"])
+        self.assertEqual(recipes.listing(), [])
+        with self.assertRaises(FileNotFoundError):
+            recipes.delete(saved["id"])
+
+    def test_bad_input_is_refused(self):
+        with self.assertRaises(ValueError):
+            recipes.save({"title": "", "source": "listen 80;"})
+        with self.assertRaises(ValueError):
+            recipes.save({"title": "Broken", "source": "server {"})
+        with self.assertRaises(ValueError):
+            recipes.save({"title": "Odd scope", "scope": "nowhere", "source": "listen 80;"})
+        with self.assertRaises(ValueError):
+            recipes.save({"title": "Odd id", "id": "../x", "source": "listen 80;"})
 
 
 class LogReaderTests(unittest.TestCase):

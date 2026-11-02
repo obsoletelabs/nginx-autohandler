@@ -5,7 +5,7 @@ RUN apk add --no-cache python3 openssl tzdata git certbot certbot-dns-cloudflare
     && rm -f /var/log/nginx/access.log /var/log/nginx/error.log \
     && mkdir -p /app /var/lib/nginx-autohandler /certs
 
-COPY server.py cloudflare.py certs.py notify.py settings.py workshop.py ipsync.py whoami.py watcher.py logs.py overview.py mailtemplate.py gitsync.py entrypoint.sh /app/
+COPY server.py cloudflare.py certs.py notify.py settings.py workshop.py ipsync.py whoami.py watcher.py logs.py overview.py mailtemplate.py gitsync.py tasks.py recipes.py entrypoint.sh /app/
 COPY nginx_model /app/nginx_model
 COPY static /app/static
 RUN chmod +x /app/entrypoint.sh

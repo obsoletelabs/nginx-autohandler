@@ -37,7 +37,9 @@ import gitsync
 import logs
 import notify
 import overview
+import recipes
 import settings
+import tasks
 import watcher
 import whoami
 import workshop
@@ -74,6 +76,7 @@ ERROR_STATUS = [
     (IsADirectoryError, 400),
     (NotADirectoryError, 400),
     (settings.SettingError, 400),
+    (certs.CertBusy, 409),
     (certs.CertError, 400),
     (ValueError, 400),
     (cloudflare.CloudflareError, 502),
@@ -341,22 +344,59 @@ def wanted_certificates(contents):
             for lineage, names in wanted.items()}
 
 
-def issue_missing_certificates(contents):
-    """Issue each missing certificate for its server_name domains. Raises before anything is written.
+def wildcard_twin(name):
+    """wildcard.example.com <-> *.example.com, the way certbot users often name a wildcard certificate."""
+    if name.startswith("wildcard."):
+        return "*." + name[len("wildcard."):]
+    return None
 
-    Only done when a Cloudflare token and a contact email are set, and only for a sensible number of names;
-    otherwise the certificate is left for nginx -t to report, so importing a working setup never fails here."""
-    issued = []
-    if not (settings.get("cloudflare_api_token") and settings.get("acme_email")):
-        return issued
+
+def resolve_certificates(contents, chosen=None):
+    """Decide what each missing certificate should contain.
+
+    Returns (resolved, ask): resolved is {lineage: names}; ask is the list of certificates that need the user to
+    say what they should contain. A certificate named after one of its server names (or the wildcard of it) simply
+    gets the server names. Anything else is a question for the user, unless they already answered in `chosen`
+    ({lineage: [names]}). `chosen=None` means nobody is there to answer, so those are left for nginx -t to report."""
+    resolved, ask = {}, []
     for lineage, names in sorted(wanted_certificates(contents).items()):
-        if not names or len(names) > MAX_AUTO_CERT_NAMES:
-            continue
+        picked = (chosen or {}).get(lineage)
+        if picked:
+            resolved[lineage] = certs.validate_domains(picked if isinstance(picked, list) else [picked])
+        elif lineage in names or wildcard_twin(lineage) in names:
+            if names and len(names) <= MAX_AUTO_CERT_NAMES:
+                resolved[lineage] = names
+        elif chosen is not None and names:
+            suggestions = [lineage, "*." + lineage] if certifiable(lineage) else []
+            suggestions += [name for name in names if name not in suggestions]
+            ask.append({"lineage": lineage, "suggestions": suggestions, "server_names": names,
+                        "default_names": [lineage] if certifiable(lineage) else None,
+                        "token_set": True, "email": settings.get("acme_email"), "can_issue": True})
+    return resolved, ask
+
+
+def can_issue_certificates():
+    return bool(settings.get("cloudflare_api_token") and settings.get("acme_email"))
+
+
+def issue_certificates(resolved):
+    """Issue each certificate in {lineage: names}. Raises before anything is written."""
+    issued = []
+    for lineage, names in sorted(resolved.items()):
         ok, output = certs.issue(names, settings.get("acme_email"), settings.get("acme_staging"), name=lineage)
         if not ok:
             raise certs.CertError(f"certificate for {lineage} failed: {certs.explain(output)}")
         issued.append(lineage)
     return issued
+
+
+def issue_missing_certificates(contents, chosen=None):
+    """Issue each missing certificate. Only done when a Cloudflare token and a contact email are set;
+    otherwise the certificate is left for nginx -t to report, so importing a working setup never fails here."""
+    if not can_issue_certificates():
+        return []
+    resolved, _ = resolve_certificates(contents, chosen)
+    return issue_certificates(resolved)
 
 
 FAILING_FILE = re.compile(r" in (/[^\s:]+):\d+")
@@ -387,16 +427,27 @@ def match_line_endings(current, content):
     return content
 
 
-def apply_workspace(files, delete=()):
+def apply_workspace(files, delete=(), certificate_names=None):
     """Write the editor's files that differ from disk, then test and reload once.
 
     A file whose rendered form matches what is already on disk is left alone, so its
     formatting stays as it was. Files named in `delete` are removed (this is how the
     editor renames and deletes). If nginx rejects the result, every file goes back,
     deleted ones included.
+
+    `certificate_names` ({lineage: [names]}) is the answer to a needs_certificates question. Passing a dict
+    (even an empty one) means someone is there to answer: a certificate that needs a choice then stops the
+    apply, before anything is written, with needs_certificates in the result.
     """
     with io_lock:
-        issued = issue_missing_certificates(files.values())
+        issued = []
+        if can_issue_certificates():
+            resolved, ask = resolve_certificates(files.values(), certificate_names)
+            if ask:
+                return {"ok": False, "saved": False, "reloaded": False, "rolled_back": False, "changed": [],
+                        "deleted": [], "needs_certificates": ask,
+                        "output": "Choose what each new certificate should contain."}
+            issued = issue_certificates(resolved)
         changes = []
         for key, content in sorted(files.items()):
             path = safe_path(key)
@@ -731,7 +782,24 @@ def post_restore(h, q):
 
 
 def get_palette(h, q):
-    h.json(200, workshop.palette())
+    palette = workshop.palette()
+    palette["recipes"] = palette["recipes"] + recipes.listing()
+    h.json(200, palette)
+
+
+def get_recipes(h, q):
+    """The user's saved blocks (the block library): /api/recipes"""
+    h.json(200, {"recipes": recipes.listing()})
+
+
+def post_recipes(h, q):
+    """Create or update a saved block: {id?, title, hint, scope, source}."""
+    h.json(200, {"recipe": recipes.save(h.read_json())})
+
+
+def post_recipes_delete(h, q):
+    recipes.delete(str(h.read_json().get("id", "")))
+    h.json(200, {"ok": True})
 
 
 def get_workspace(h, q):
@@ -743,8 +811,11 @@ def post_workspace_apply(h, q):
     delete = body.get("delete", [])
     if not isinstance(delete, list) or not all(isinstance(item, str) for item in delete):
         raise ValueError("'delete' must be a list of file paths")
+    names = body.get("certificate_names", {})
+    if not isinstance(names, dict):
+        raise ValueError("'certificate_names' must be an object of certificate name to list of host names")
     doc = workshop.document_from(body)
-    h.json(200, apply_workspace(generate_files(doc), delete))
+    h.json(200, apply_workspace(generate_files(doc), delete, names))
 
 
 PREFS_FILE = DATA_DIR / "ui-prefs.json"
@@ -841,7 +912,8 @@ def post_dns_set_ip(h, q):
         return h.json(400, {"error": "no domains to update. Add a domain first."})
     if get_cf() is None:
         return h.json(400, {"error": "Cloudflare API token is not set"})
-    result = sync_domains(domains, ip)
+    with tasks.track("dns", f"Pointing {len(domains)} domain(s) at {ip}", ", ".join(domains[:5])):
+        result = sync_domains(domains, ip)
     if "results" in result:
         remember_sync(domains, ip)
     h.json(200, result)
@@ -850,7 +922,9 @@ def post_dns_set_ip(h, q):
 def post_dns_sync(h, q):
     if get_cf() is None:
         return h.json(400, {"error": "Cloudflare API token is not set"})
-    h.json(200, run_dns_sync())
+    with tasks.track("dns", "Updating DNS records"):
+        result = run_dns_sync()
+    h.json(200, result)
 
 
 def get_settings(h, q):
@@ -1031,10 +1105,18 @@ def get_certs_match(h, q):
                  "token_set": bool(settings.get("cloudflare_api_token")), "email": settings.get("acme_email")})
 
 
+def get_tasks(h, q):
+    """Running and recently finished background jobs (certificate requests, git sync, DNS updates)."""
+    h.json(200, tasks.snapshot())
+
+
+def get_certs_folder(h, q):
+    """What a folder of certificate files holds: /api/certs/folder?path=/certs/example"""
+    h.json(200, certs.folder_info(q.get("path", [""])[0]))
+
+
 def get_certs(h, q):
-    output = certs.list_certificates()
-    listed = certs.inventory() or certs.parse_certificates(output)
-    h.json(200, {"certificates": listed, "output": output, "staging": settings.get("acme_staging"),
+    h.json(200, {"certificates": certs.inventory(), "output": "", "staging": settings.get("acme_staging"),
                  "email": settings.get("acme_email"), "token_set": bool(settings.get("cloudflare_api_token")),
                  "warn_days": settings.get("cert_expiry_warn_days"),
                  "renew_days": settings.get("cert_renew_days")})
@@ -1049,7 +1131,10 @@ def post_certs_issue(h, q):
         raise ValueError("'domains' must be a list")
     staging = bool(body.get("staging", settings.get("acme_staging")))
     names = certs.validate_domains(domains)
-    ok, output = certs.issue(names, settings.get("acme_email"), staging)
+    lineage = str(body.get("name", "")).strip().lower() or None
+    if lineage and not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", lineage):
+        raise ValueError("the certificate name may only use letters, digits, dots, dashes and underscores")
+    ok, output = certs.issue(names, settings.get("acme_email"), staging, name=lineage)
     result = {"ok": ok, "message": "Certificate issued." if ok else certs.explain(output), "output": output,
               "staging": staging, "domains": names, "dns": None}
     if ok and get_cf() is not None:
@@ -1101,7 +1186,8 @@ def post_git_sync(h, q):
     if direction not in (None, "pull", "push", "both"):
         raise ValueError("'direction' must be pull, push or both")
     prefer = "repo" if body.get("prefer") == "repo" else None
-    result = gitsync.sync(git_local_files, apply_workspace_files, prefer=prefer, direction=direction)
+    with tasks.track("git", "Syncing with the git repository", direction or "as configured"):
+        result = gitsync.sync(git_local_files, apply_workspace_files, prefer=prefer, direction=direction)
     pulled = (result.get("pull") or {}).get("pulled")
     pushed = (result.get("push") or {}).get("pushed")
     if pulled or pushed:
@@ -1154,6 +1240,9 @@ def post_certs_delete(h, q):
 ROUTES = {
     ("GET", "/api/config"): get_config,
     ("GET", "/api/palette"): get_palette,
+    ("GET", "/api/recipes"): get_recipes,
+    ("POST", "/api/recipes"): post_recipes,
+    ("POST", "/api/recipes/delete"): post_recipes_delete,
     ("GET", "/api/workspace"): get_workspace,
     ("POST", "/api/workspace/apply"): post_workspace_apply,
     ("GET", "/api/prefs"): get_prefs,
@@ -1178,6 +1267,8 @@ ROUTES = {
     ("POST", "/api/notify/test"): post_notify_test,
     ("GET", "/api/certs"): get_certs,
     ("GET", "/api/certs/match"): get_certs_match,
+    ("GET", "/api/certs/folder"): get_certs_folder,
+    ("GET", "/api/tasks"): get_tasks,
     ("POST", "/api/certs/issue"): post_certs_issue,
     ("POST", "/api/certs/reissue"): post_certs_reissue,
     ("POST", "/api/certs/selfsigned"): post_certs_selfsigned,

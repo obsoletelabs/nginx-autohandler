@@ -5,6 +5,7 @@ not need port 80 reachable from the internet. Certificates live under
 /etc/letsencrypt, which compose mounts from ./data/certs.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -18,8 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import settings
+import tasks
 
-log = logging.getLogger("nginx-autohandler.certs")
+log =logging.getLogger("nginx-autohandler.certs")
 
 CONFIG_DIR = "/etc/letsencrypt"
 STATE_DIR = settings.DATA_DIR / "certbot"
@@ -32,6 +34,21 @@ SELFSIGNED_MARKER = "selfsigned.json"
 
 class CertError(ValueError):
     pass
+
+
+class CertBusy(CertError):
+    """Another certbot run is in progress."""
+
+
+@contextlib.contextmanager
+def exclusive():
+    """Only one certbot run at a time (it keeps a lock of its own and refuses to start a second one)."""
+    if not _renew_lock.acquire(blocking=False):
+        raise CertBusy("Another certificate request is already running. Wait for it to finish (see Tasks).")
+    try:
+        yield
+    finally:
+        _renew_lock.release()
 
 
 def _certbot(args, timeout=900):
@@ -166,7 +183,10 @@ def issue(domains, email, staging, name=None):
     ]
     for name in domains:
         args += ["-d", name]
-    ok, output = _certbot(args)
+    with exclusive(), tasks.track("certificate", f"Issuing certificate {lineage}", ", ".join(domains)) as task:
+        ok, output = _certbot(args)
+        if not ok:
+            task.fail(explain(output))
     log.info("certbot issue %s: %s", domains, "ok" if ok else "failed")
     return ok, output
 
@@ -417,7 +437,8 @@ def delete_certificate(name):
             raise CertError(f"'{name}' comes from a bind-mounted folder, so it is read-only here. Remove it at its source.")
         raise FileNotFoundError(f"no certificate called {name}")
     if (Path(CONFIG_DIR) / "renewal" / f"{name}.conf").exists():
-        ok, output = _certbot(["delete", "--cert-name", name], timeout=120)
+        with exclusive():
+            ok, output = _certbot(["delete", "--cert-name", name], timeout=120)
         if not ok:
             raise CertError(explain(output))
         return
@@ -531,6 +552,46 @@ def external_inventory():
     return found
 
 
+def folder_bases():
+    """Folders a certificate folder may be picked from."""
+    bases = [*external_dirs(), Path(CONFIG_DIR), Path("/etc/nginx"), Path("/certs"), Path("/etc/ssl")]
+    return [base for base in bases if str(base)]
+
+
+def folder_info(path):
+    """What a folder of certificate files holds. {found, cert_path, key_path, domains, expires, ...} or an error text."""
+    text = (path or "").strip()
+    if not text:
+        raise CertError("enter the folder that holds the certificate files")
+    try:
+        folder = Path(text).resolve()
+    except (OSError, RuntimeError):
+        raise CertError("that is not a valid path")
+    if not any(folder == base.resolve() or base.resolve() in folder.parents for base in folder_bases()):
+        allowed = ", ".join(str(base) for base in folder_bases())
+        raise CertError(f"certificate folders must be under one of: {allowed}")
+    if not folder.is_dir():
+        return {"path": str(folder), "found": False, "error": "That folder does not exist in the container. "
+                "Mount it (for example ./my-certs:/certs:ro) and use the path inside the container."}
+    pairs = _external_pairs(folder)
+    if not pairs:
+        return {"path": str(folder), "found": False,
+                "error": "No certificate and key pair found. Expected fullchain.pem + privkey.pem, "
+                         "cert.pem + key.pem, or name.crt + name.key."}
+    name, cert, key = pairs[0]
+    try:
+        info = describe_certificate(cert.read_text(encoding="utf-8"))
+    except OSError:
+        info = None
+    if info is None:
+        return {"path": str(folder), "found": False, "error": f"{cert.name} could not be read as a certificate."}
+    days = info["days_left"]
+    return {"path": str(folder), "found": True, "name": name, "cert_path": str(cert), "key_path": str(key),
+            "domains": info["domains"], "expires": info["expires"], "days_left": days,
+            "valid": days is not None and days > 0, "issuer": info["issuer"],
+            "others": [{"name": n, "cert_path": str(c), "key_path": str(k)} for n, c, k in pairs[1:]]}
+
+
 def _selfsigned_info(name):
     """(domains, days, generated_here) of a self-signed lineage, or None when `name` is not self-signed."""
     folder = LIVE_DIR() / name
@@ -554,9 +615,11 @@ def reissue(name, staging=None):
     if (Path(CONFIG_DIR) / "renewal" / f"{name}.conf").exists():
         if not settings.get("cloudflare_api_token") or not write_credentials().exists():
             raise CertError("set the Cloudflare API token first")
-        with _renew_lock:
+        with exclusive(), tasks.track("reissue", f"Reissuing certificate {name}") as task:
             ok, output = _certbot(["renew", "--cert-name", name, "--force-renewal", "--deploy-hook", "nginx -s reload"],
                                   timeout=1200)
+            if not ok:
+                task.fail(explain(output))
         log.info("certbot reissue %s: %s", name, "ok" if ok else "failed")
         return ok, output
     info = _selfsigned_info(name)
@@ -587,9 +650,11 @@ def renew_due():
         if entry.get("kind") in ("letsencrypt", "acme"):
             if not can_acme or days_left > limit or not (Path(CONFIG_DIR) / "renewal" / f"{name}.conf").exists():
                 continue
-            with _renew_lock:
+            with _renew_lock, tasks.track("reissue", f"Renewing certificate {name}", f"{days_left} days left") as task:
                 ok, output = _certbot(["renew", "--cert-name", name, "--force-renewal",
                                        "--deploy-hook", "nginx -s reload"], timeout=1200)
+                if not ok:
+                    task.fail(explain(output))
         elif entry.get("kind") == "selfsigned":
             info = _selfsigned_info(name)
             if info is None or not info[2] or days_left > min(limit, max(1, info[1] // 3)):
