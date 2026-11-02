@@ -103,3 +103,14 @@ body.dragging .node-card::before, body.dragging .node-card::after, body.dragging
 .node:has(> .node-card > .include-info) .include-info summary { color: var(--block); font-weight: 600; }
 .node:has(> .node-card > .include-info) .include-info pre { background: color-mix(in srgb, var(--block) 7%, transparent); border: 1px solid color-mix(in srgb, var(--block) 35%, transparent); color: var(--ink); }
 .node:has(> .node-card > .include-info) .include-info button { background: transparent; border: 1px solid color-mix(in srgb, var(--block) 45%, transparent); color: var(--block); }
+
+/* Inline comments: a trailing note on the row that owns them. */
+.node-note, .note-add { flex: 0 1 auto; max-width: 42%; min-width: 0; margin: 0 2px; padding: 1px 8px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--muted, #6b7785); font: inherit; font-size: 11px; font-family: var(--mono, ui-monospace, monospace); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.node-note { border-color: color-mix(in srgb, var(--block, #888) 30%, transparent); background: color-mix(in srgb, var(--block, #888) 10%, transparent); font-style: italic; }
+.node-note:hover { border-color: color-mix(in srgb, var(--block, #888) 60%, transparent); }
+.node-note.static { cursor: default; margin-left: auto; }
+.note-add { opacity: 0; cursor: pointer; }
+.node-head:hover .note-add, .node.selected .note-add, .note-add:focus-visible { opacity: .9; border-color: color-mix(in srgb, var(--block, #888) 40%, transparent); }
+.note-add:hover { background: color-mix(in srgb, var(--block, #888) 14%, transparent); }
+.note-input { flex: 1 1 180px; max-width: 46%; min-width: 120px; padding: 1px 8px; border: 1px solid var(--block, #888); border-radius: 10px; background: var(--paper); color: inherit; font-size: 11px; font-family: var(--mono, ui-monospace, monospace); }
+@media (hover: none) { .note-add { opacity: .7; } }

@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/static/modals.css">
   <link rel="stylesheet" href="/static/blocks.css">
   <link rel="stylesheet" href="/static/views.css">
+  <link rel="stylesheet" href="/static/basic.css">
   <script src="/static/errors.js" defer></script>
   <script src="/static/features.js" defer></script>
   <script src="/static/basic-editor.js" defer></script>
@@ -26,8 +27,13 @@
   <script src="/static/shell.js" defer></script>
   <script src="/static/files.js" defer></script>
   <script src="/static/views.js" defer></script>
+  <script src="/static/folders.js" defer></script>
   <script src="/static/import.js" defer></script>
   <script src="/static/git.js" defer></script>
+  <script src="/static/https.js" defer></script>
+  <script src="/static/tasks.js" defer></script>
+  <script src="/static/basic2.js" defer></script>
+  <script src="/static/library.js" defer></script>
   <script src="/static/modals.js" defer></script>
 </head>
 <body>
@@ -48,6 +54,7 @@
       <button id="btnCerts" class="quiet" title="Issue, upload and renew certificates">Certificates</button>
       <button id="btnDns" class="quiet" title="Cloudflare DNS and dynamic IP">DNS</button>
       <button id="btnGit" class="quiet" title="Sync the config with a git repository">Git sync</button>
+      <button id="btnTasks" class="quiet task-button" title="Background tasks: certificates, git and DNS">Tasks<span id="tasksBadge" class="task-badge" hidden>0</span></button>
       <button id="btnActivity" class="quiet" title="Recent changes and reloads">Activity</button>
       <button id="btnTheme" class="quiet" title="Light or dark theme">☾ Dark</button>
       <button id="btnPrefs" class="quiet" title="Display preferences">Preferences</button>
@@ -71,16 +78,19 @@
 
   <section class="document-bar">
     <div>
-      <div class="eyebrow">CONFIG TREE / <span id="savedLabel">NOT APPLIED</span></div>
+      <div class="eyebrow">CONFIG TREE / <span id="savedLabel">NOT SAVED</span></div>
       <input id="documentName" class="document-title" aria-label="Configuration name" value="Loading…">
       <div class="document-subtitle"><span id="fileCount">0 files</span><span class="separator">/</span><span id="nodeCount">0 blocks & directives</span><span class="separator">/</span><span id="changeStatus">Ready</span></div>
     </div>
     <div class="document-actions">
       <button id="newBtn">↻ Reload from disk</button>
       <button id="historyBtn">History</button>
-      <button id="saveBtn" class="primary">Apply to nginx</button>
+      <button id="toggleBtn" class="enable-switch" type="button" role="switch" aria-checked="true" hidden title="Turn this file on or off. nginx ignores a file that is off."><span class="switch-track"><span class="knob"></span></span><span id="toggleLabel">Enabled</span></button>
+      <button id="saveBtn" class="primary" title="Write the files, test the config and reload nginx (Ctrl+S)">Save</button>
     </div>
   </section>
+
+  <div id="saveNotice" class="save-notice" role="status" hidden></div>
 
   <nav class="workbar" aria-label="Editor views">
     <div class="mode-tabs"><button data-mode="basic">▦ Basic</button><button data-mode="blocks" class="active">▧ Blocks</button><button data-mode="raw">⌘ Nginx</button></div>
@@ -89,23 +99,9 @@
   <div class="check-banner" id="checkBanner" aria-live="polite"><span id="autoCheckText">Checking document…</span><button id="checkDetails" class="tiny">Details ↗</button></div>
 
   <main class="workspace">
-    <aside class="left-panel">
-      <div class="panel-heading">CONFIG FILES <span id="fileSummary" class="file-summary" hidden></span>
-        <span class="heading-actions"><button id="btnQuick" class="tiny" aria-label="Go to file (Ctrl+P)" title="Go to file (Ctrl+P)">⌕</button><button id="importBtn" class="tiny" aria-label="Import files, a folder or a zip" title="Import files, a folder or a zip">⇪</button><button id="addFileBtn" class="tiny" aria-label="Add file" title="Add file">＋</button></span></div>
-      <label class="search-box file-filter"><span>⌕</span><input id="fileFilter" placeholder="Filter by file or domain…" aria-label="Filter files by name or domain" autocomplete="off" spellcheck="false"></label>
-      <div id="fileList" class="file-list" role="tree" aria-label="Config files"></div>
-      <div id="fileSplit" class="file-split" role="separator" aria-orientation="horizontal" title="Drag to resize the file list"></div>
-      <div class="panel-heading palette-heading">BLOCK LIBRARY <span class="muted">↘</span></div>
-      <label class="search-box"><span>⌕</span><input id="paletteSearch" placeholder="Find a directive…" aria-label="Find a directive"></label>
-      <div id="palette" class="palette"></div>
-      <div class="palette-note"><span>✦</span><p>Drag a block into a scope, or select a scope and click a block. Custom directives stay where they belong.</p></div>
-    </aside>
-
     <section class="editor-panel">
       <div class="canvas-bar">
         <div class="crumb-wrap">
-          <button id="navBack" class="icon-button" title="Back (Alt+Left)" aria-label="Previous file" disabled>←</button>
-          <button id="navFwd" class="icon-button" title="Forward (Alt+Right)" aria-label="Next file" disabled>→</button>
           <span class="file-icon">▤</span>
           <span id="activeFile" class="crumbs">nginx.conf</span>
           <span id="fileFlags" class="file-flags"></span>
@@ -113,20 +109,26 @@
         <span id="includedBy" class="included-by"></span>
         <span id="contextLabel" class="context-chip">HTTP CONTEXT</span>
       </div>
+      <div id="disabledNote" class="disabled-note" role="status" hidden><span>Disabled: nginx ignores this file.</span><button id="disabledEnable" type="button" class="tiny">Enable</button></div>
       <div id="canvas" class="canvas" tabindex="-1"></div>
       <div class="canvas-footer"><span id="canvasHint">Select a block to edit its arguments</span><span>ORDER & SCOPE PRESERVED</span></div>
       <div id="viewPane" class="view-pane" hidden></div>
     </section>
 
     <aside class="right-panel">
-      <div class="right-tabs"><button data-right="inspector" class="active">Inspector</button><button data-right="preview">Live output</button><button data-right="settings">Settings</button></div>
+      <div class="right-tabs"><button data-right="inspector" class="active">Inspector</button><button data-right="preview">Live output</button><button data-right="library">Blocks</button><button data-right="settings">Settings</button></div>
       <div id="inspector" class="right-content"></div>
       <div id="preview" class="right-content hidden"><div class="preview-toolbar"><select id="previewType" aria-label="Output view"><option value="original">Current file</option><option value="effective">Effective config</option></select><button id="copyBtn" class="tiny">Copy</button></div><p id="includeWarning" class="hint"></p><pre id="codePreview" class="code-preview"></pre></div>
+      <div id="library" class="right-content hidden">
+        <label class="search-box"><span>⌕</span><input id="paletteSearch" placeholder="Find a directive…" aria-label="Find a directive"></label>
+        <div id="palette" class="palette"></div>
+        <div class="palette-note"><span>✦</span><p>Drag a block into a scope, or select a scope and click a block. Custom directives stay where they belong.</p></div>
+      </div>
       <div id="settings" class="right-content hidden"></div>
     </aside>
   </main>
 
-  <footer class="statusbar"><span><i></i> Config root <span class="muted" id="configRoot"></span></span><span id="validationStatus">Not validated on a host</span><span>Edit → Validate → Apply to nginx</span></footer>
+  <footer class="statusbar"><span><i></i> Config root <span class="muted" id="configRoot"></span></span><span id="validationStatus">Not validated on a host</span><span>Edit → Validate → Save</span></footer>
   <div id="toast" role="status" aria-live="polite"></div>
 
   <dialog id="dlgAsk">
@@ -288,6 +290,30 @@
     <div class="dialog-actions"><button id="btnGitRefresh" type="button">Refresh</button><span class="spacer"></span><button type="button" data-close="dlgGit" class="primary">Close</button></div>
   </dialog>
 
+  <dialog id="dlgTasks" class="wide">
+    <div class="dialog-heading"><div><div class="eyebrow">BACKGROUND</div><h2>Tasks</h2><p id="tasksIntro" class="dialog-intro"></p></div><button type="button" class="tiny" data-close="dlgTasks" aria-label="Close">✕</button></div>
+    <div class="dialog-body"><ul id="tasksList" class="task-list"></ul></div>
+    <div class="dialog-actions"><button id="btnTasksRefresh" type="button">Refresh</button><span class="spacer"></span><button type="button" data-close="dlgTasks" class="primary">Close</button></div>
+  </dialog>
+
+  <dialog id="dlgBlock" class="wide">
+    <div class="dialog-heading"><div><div class="eyebrow">BLOCK LIBRARY</div><h2 id="blockTitle">New block</h2></div><button type="button" class="tiny" data-close="dlgBlock" aria-label="Close">✕</button></div>
+    <div id="blockBody" class="dialog-body"></div>
+    <div class="dialog-actions"><span class="spacer"></span><button type="button" data-close="dlgBlock">Cancel</button><button id="btnBlockSave" type="button" class="primary">Save block</button></div>
+  </dialog>
+
+  <dialog id="dlgHttps" class="wide">
+    <div class="dialog-heading"><div><div id="httpsEyebrow" class="eyebrow">TLS</div><h2 id="httpsTitle">Enable HTTPS</h2></div><button type="button" class="tiny" data-close="dlgHttps" aria-label="Close">✕</button></div>
+    <div id="httpsBody" class="dialog-body"></div>
+    <div class="dialog-actions"><span class="spacer"></span><button type="button" data-close="dlgHttps">Cancel</button><button id="btnHttpsGo" type="button" class="primary" disabled>Enable HTTPS</button></div>
+  </dialog>
+
+  <dialog id="dlgNames">
+    <div class="dialog-heading"><div><div class="eyebrow">CERTIFICATE</div><h2>New certificate needed</h2></div><button type="button" class="tiny" data-close="dlgNames" aria-label="Close">✕</button></div>
+    <div id="namesBody" class="dialog-body"></div>
+    <div class="dialog-actions"><span class="spacer"></span><button type="button" data-close="dlgNames">Cancel</button><button id="btnNamesGo" type="button" class="primary">Issue and save</button></div>
+  </dialog>
+
   <dialog id="dlgActivity" class="wide">
     <div class="dialog-heading"><div><div class="eyebrow">NGINX</div><h2>Activity</h2></div><button type="button" class="tiny" data-close="dlgActivity" aria-label="Close">✕</button></div>
     <div class="dialog-body">
@@ -297,8 +323,16 @@
     <div class="dialog-actions"><button id="btnActivityRefresh" type="button">Refresh</button><span class="spacer"></span><button type="button" data-close="dlgActivity" class="primary">Close</button></div>
   </dialog>
 
+  <dialog id="dlgNewFile">
+    <div class="dialog-heading"><div><div class="eyebrow">DRAFT</div><h2>New file</h2></div><button type="button" class="tiny" data-close="dlgNewFile" aria-label="Close">✕</button></div>
+    <div id="newFileBody" class="dialog-body"></div>
+    <div class="dialog-actions"><span class="spacer"></span><button type="button" data-close="dlgNewFile">Cancel</button><button id="btnNewFileGo" type="button" class="primary">Create</button></div>
+  </dialog>
+
+  <div id="dropOverlay" class="drop-overlay" hidden><div><strong>Drop to import</strong><span>Files, a folder or a .zip. You see a summary before anything is added.</span></div></div>
+
   <dialog id="dlgImport">
-    <div class="dialog-heading"><div><div class="eyebrow">DRAFT</div><h2>Import configuration</h2><p class="dialog-intro">Bring in a folder, several files or a .zip. Nothing is written until you press Apply to nginx.</p></div><button type="button" class="tiny" data-close="dlgImport" aria-label="Close">✕</button></div>
+    <div class="dialog-heading"><div><div class="eyebrow">DRAFT</div><h2>Import configuration</h2><p class="dialog-intro">Bring in a folder, several files or a .zip. Nothing is written until you press Save.</p></div><button type="button" class="tiny" data-close="dlgImport" aria-label="Close">✕</button></div>
     <div id="importBody" class="dialog-body"></div>
     <div class="dialog-actions"><span id="importStatus" class="tiny muted"></span><span class="spacer"></span><button type="button" data-close="dlgImport">Cancel</button><button id="btnImportGo" type="button" class="primary" disabled>Add to draft</button></div>
   </dialog>

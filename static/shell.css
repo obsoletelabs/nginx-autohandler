@@ -49,8 +49,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .topbar, .document-bar, .workbar, .check-banner, .statusbar { flex: none; }
 .topbar { height: auto; min-height: 60px; }
 .document-bar { padding: 14px 24px 12px; }
-.workspace { flex: 1; height: auto; min-height: 0; grid-template-columns: 236px minmax(0, 1fr) 330px; }
-.left-panel { min-height: 0; overflow: hidden; padding: 14px 14px 0; }
+.workspace { flex: 1; height: auto; min-height: 0; grid-template-columns: minmax(0, 1fr) 340px; }
 .palette { flex: 1; min-height: 0; overflow: auto; padding-bottom: 14px; }
 .editor-panel, .right-panel { min-height: 0; }
 .right-content { min-height: 0; }
@@ -65,10 +64,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .file-clone { padding: 0 8px; color: var(--c-7d858c); border: 0; background: transparent; }
 .file-clone:hover { color: var(--c-242c35); }
 
-/* Library: the file list keeps to about a third of the panel and the block list scrolls under it.
-   These rules come after features.css, which sets the palette to grow instead of scroll. */
-.left-panel > .file-list { flex: 0 0 auto; max-height: 34%; overflow: auto; }
-.left-panel > .palette { flex: 1 1 0; min-height: 0; overflow: auto; }
+/* Blocks tab of the right panel: the search stays put and the block list scrolls under it. */
+#library:not(.hidden) { display: flex; flex-direction: column; gap: 8px; }
+#library .search-box { margin: 0; flex: none; }
+#library .palette { flex: 1 1 0; min-height: 120px; overflow: auto; padding-bottom: 6px; }
+#library .palette-note { flex: none; margin-top: 4px; }
 
 /* Dark mode: accent colours stay on borders and markers; text uses the ink colour on a dark tint. */
 :root[data-theme="dark"] .palette-block,
@@ -128,3 +128,47 @@ body { display: flex; flex-direction: column; height: 100vh; }
   :root:not([data-theme="light"]) .basic-card-heading strong { color: #9cc3e6; }
 }
 .tool-group .quiet { padding-left: 11px; padding-right: 11px; }
+
+/* Basic view: the certificate disclosure followed a hard-coded white. */
+.tls-settings, .advanced-area { background: var(--paper); }
+.tls-settings > summary, .advanced-area > summary { color: var(--muted); }
+
+/* Document bar: Save, and the Enabled switch for the open file. */
+.document-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.enable-switch { display: inline-flex; align-items: center; gap: 9px; padding: 0 13px 0 9px; }
+.enable-switch[hidden] { display: none; }
+.switch-track { position: relative; flex: none; width: 30px; height: 18px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 24%, var(--paper)); transition: background .15s; }
+.enable-switch .knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .35); transition: transform .15s; }
+.enable-switch.on .switch-track { background: var(--green); }
+.enable-switch.on .knob { transform: translateX(12px); }
+#saveBtn:disabled { opacity: .7; cursor: progress; }
+
+/* Saved but not reloaded: amber, not green and not red. */
+.save-notice { flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 10px 24px; font-size: 12.5px; line-height: 1.5; border-bottom: 1px solid color-mix(in srgb, #c58a1d 55%, var(--line)); background: color-mix(in srgb, #d9a13a 15%, var(--paper)); }
+.save-notice[hidden] { display: none; }
+.save-notice > .tiny { margin-left: auto; flex: none; }
+.notice-mark { flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%; background: #c58a1d; color: #fff; font-weight: 800; font-size: 13px; text-align: center; line-height: 20px; }
+.notice-text { min-width: 0; flex: 1; }
+.notice-text p { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.notice-files code { font: 11.5px var(--mono); padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--ink) 8%, transparent); overflow-wrap: anywhere; }
+#toast.warn { background: #8a5d10; }
+
+.disabled-note { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 22px; font-size: 12.5px; background: color-mix(in srgb, var(--ink) 6%, var(--paper)); border-bottom: 1px solid var(--line); }
+.disabled-note[hidden] { display: none; }
+.editor-panel.showing-view > .disabled-note { display: none; }
+
+/* Dropping files from the desktop. */
+.drop-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; pointer-events: none; background: color-mix(in srgb, var(--paper) 75%, transparent); backdrop-filter: blur(3px); }
+.drop-overlay[hidden] { display: none; }
+.drop-overlay > div { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 38px 60px; border: 2px dashed var(--orange); border-radius: 18px; background: var(--paper); text-align: center; }
+.drop-overlay strong { font-size: 22px; }
+.drop-overlay span { color: var(--muted); font-size: 13px; max-width: 340px; }
+
+/* Keep the top bar on one row down to 1280px wide (the Tasks button made it a little wider). */
+@media (max-width: 1360px) {
+  .topbar { column-gap: 6px; padding-left: 12px; padding-right: 12px; }
+  .brand-text { font-size: 14px; }
+  .tool-group { padding-left: 6px; margin-left: 0; }
+  .tool-group .quiet, .tool-group button { padding-left: 8px; padding-right: 8px; }
+}

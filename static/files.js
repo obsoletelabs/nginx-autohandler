@@ -157,6 +157,10 @@ function rememberMode(path, mode) {
 
 // state.view is "" while a config file is showing, "home" for the landing page, or "log:<id>" for a log.
 Object.assign(state, { deletedFiles: [], deletedDocs: {}, diskFiles: new Set(), baseline: new Map(), fileView: {}, view: "" });
+// Turned-off files keep their name with .disabled added (the convention /api/config/toggle uses).
+const isConfPath = (path) => path.endsWith(".conf") && path.split("/").pop() !== "nginx.conf";
+const isDisabledPath = (path) => path.endsWith(".conf.disabled");
+
 const nav = { back: [], fwd: [], shown: "", rows: [], filter: "", quickIndex: 0, quickItems: [] };
 
 // What is on screen: a file path, "home", or "log:<id>". History and tabs all speak in these keys.
@@ -490,7 +494,7 @@ function toggleFolder(path, filtering) {
 }
 
 function fileRow(file, info, depth, tokens) {
-  const active = file.path === state.file && !state.view;
+  const active = file.path === state.file;
   const name = file.path.split("/").pop();
   const entry = file.path === state.doc.entrypoint;
   const parent = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
@@ -498,21 +502,24 @@ function fileRow(file, info, depth, tokens) {
   const ordered = [...shown, ...info.domains.filter((domain) => !shown.includes(domain))];
   const chips = ordered.slice(0, 3).map((domain) => el("span", { class: "nav-domain" + (shown.includes(domain) ? " hit" : ""), text: domain }));
   if (ordered.length > 3) chips.push(el("span", { class: "nav-more", title: ordered.slice(3).join(", "), text: `+${ordered.length - 3}` }));
+  const off = isDisabledPath(file.path);
   const row = el(
     "div",
-    { class: "nav-row file" + (active ? " active" : ""), role: "treeitem", "aria-selected": String(active), tabindex: "-1", "data-path": file.path, "data-parent": parent, title: file.path },
+    { class: "nav-row file" + (active ? " active" : "") + (off ? " off" : ""), role: "treeitem", "aria-selected": String(active), tabindex: "-1", "data-path": file.path, "data-parent": parent, title: file.path },
     el("div", { class: "nav-line" },
       el("span", { class: "file-icon", text: "▤" }),
       el("span", { class: "nav-name", text: name }),
       entry ? badge("entry", "ENTRY", "Entry file: nginx loads this first") : null,
+      off ? badge("off", "OFF", "Disabled: nginx ignores this file") : null,
       info.tls ? badge("tls", "TLS", "Serves TLS certificates") : null,
       info.errors ? badge("err", String(info.errors), `${info.errors} problem(s) found by the checks`) : null,
       !info.errors && info.warnings ? badge("warn", String(info.warnings), `${info.warnings} suggestion(s)`) : null,
-      info.isNew ? badge("new", "NEW", "Not on disk yet. Apply writes it.") : null,
+      info.isNew ? badge("new", "NEW", "Not on disk yet. Save writes it.") : null,
       info.changed ? el("span", { class: "nav-dot", title: "Unsaved changes" }) : null,
       el("span", { class: "nav-actions" },
         navButton("⧉", "Clone this file", () => cloneFile(file).catch(report)),
-        entry || !file.path.endsWith(".conf") ? null : navButton("⏻", "Disable (kept as name.conf.disabled, listed on the Overview)", () => toggleConfig(file.path, false).catch(report)),
+        off ? navButton("⏻", "Enable (renamed back to .conf)", () => toggleConfig(file.path, true).catch(report))
+          : entry || !file.path.endsWith(".conf") ? null : navButton("⏻", "Disable (kept as name.conf.disabled, listed on the Overview)", () => toggleConfig(file.path, false).catch(report)),
         entry ? null : navButton("✎", "Rename (F2)", () => renameFile(file).catch(report)),
         entry ? null : navButton("✕", "Delete (Del)", () => deleteFile(file).catch(report)),
       ),
@@ -522,8 +529,121 @@ function fileRow(file, info, depth, tokens) {
     ),
   );
   row.style.setProperty("--depth", depth);
-  row.addEventListener("click", () => openFile(file.path).catch(report));
+  // A double click renames in place, so a single click waits a moment to see whether a second one follows.
+  row.addEventListener("click", (event) => {
+    if (suppressRowClick || event.target.closest(".nav-rename")) return;
+    clearTimeout(row._open);
+    row._open = setTimeout(() => openFile(file.path).catch(report), entry ? 0 : 220);
+  });
+  row.addEventListener("dblclick", (event) => {
+    if (entry || event.target.closest(".nav-act, .nav-rename")) return;
+    clearTimeout(row._open);
+    renameFile(file).catch(report);
+  });
+  row.addEventListener("pointerdown", (event) => { if (!event.target.closest(".nav-rename")) beginFileDrag(event, row, file); });
   return row;
+}
+
+// Rename right in the tree: the name becomes a text box. Enter saves, Escape cancels, a "/" moves it to a folder.
+function beginInlineRename(row, file) {
+  const label = $(".nav-name", row);
+  if (!label || $(".nav-rename", row)) return;
+  const name = file.path.split("/").pop();
+  const parent = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+  const input = el("input", { class: "nav-rename", type: "text", value: name, "aria-label": "New file name", spellcheck: "false" });
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const value = input.value.trim();
+    input.replaceWith(label);
+    if (!save || !value || value === name) return;
+    const target = value.includes("/") ? value.replace(/^\/+/, "") : (parent ? parent + "/" : "") + value;
+    if (!(await applyDraft())) return;
+    await renameFileTo(file, withExtension(target));
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") { event.preventDefault(); finish(true).catch(report); }
+    if (event.key === "Escape") { event.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true).catch(report));
+  for (const type of ["click", "dblclick", "pointerdown"]) input.addEventListener(type, (event) => event.stopPropagation());
+  label.replaceWith(input);
+  input.focus();
+  const dot = name.indexOf(".");
+  input.setSelectionRange(0, dot > 0 ? dot : name.length);
+}
+
+let suppressRowClick = false;
+
+// Drag a file row onto a folder row (or empty space for the config root) to move it. Pointer based,
+// like the tab reordering; nothing is written to disk until Save.
+function beginFileDrag(event, row, file) {
+  if (event.button !== 0 || event.target.closest(".nav-act") || file.path === state.doc.entrypoint) return;
+  const list = $("#fileList");
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let dragging = false;
+  let chip = null;
+  let target = null;
+  const parentOf = (path) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+  const pick = (x, y) => {
+    const under = document.elementFromPoint(x, y);
+    if (!under || !list.contains(under)) return null;
+    const hit = under.closest(".nav-row");
+    if (!hit) return { folder: "", row: null };
+    return hit.classList.contains("folder") ? { folder: hit.dataset.folder, row: hit } : { folder: hit.dataset.parent || "", row: null };
+  };
+  const clear = () => {
+    for (const item of $$(".nav-row.drop-target", list)) item.classList.remove("drop-target");
+    list.classList.remove("drop-root");
+  };
+  const move = (e) => {
+    if (e.buttons === 0) { finish(false); return; }
+    if (!dragging) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return;
+      dragging = true;
+      row.classList.add("dragging");
+      list.classList.add("drag-active");
+      document.body.classList.add("moving-file");
+      chip = el("div", { class: "move-chip" });
+      document.body.append(chip);
+    }
+    chip.style.left = e.clientX + 14 + "px";
+    chip.style.top = e.clientY + 12 + "px";
+    const hit = pick(e.clientX, e.clientY);
+    clear();
+    target = hit && hit.folder !== parentOf(file.path) ? hit : null;
+    if (target) {
+      if (target.row) target.row.classList.add("drop-target");
+      else if (!target.folder) list.classList.add("drop-root");
+    }
+    chip.textContent = !hit ? `${file.path.split("/").pop()} · drop on a folder` : target ? `Move to ${target.folder ? target.folder + "/" : "the config root"}` : "Already in this folder";
+    chip.classList.toggle("ok", !!target);
+    const box = list.getBoundingClientRect();
+    if (e.clientY < box.top + 24) list.scrollTop -= 12;
+    else if (e.clientY > box.bottom - 24) list.scrollTop += 12;
+  };
+  const finish = (drop) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", cancel);
+    if (!dragging) return;
+    clear();
+    row.classList.remove("dragging");
+    list.classList.remove("drag-active");
+    document.body.classList.remove("moving-file");
+    if (chip) chip.remove();
+    suppressRowClick = true;
+    setTimeout(() => { suppressRowClick = false; }, 0);
+    if (drop && target) moveFileToFolder(file, target.folder).catch(report);
+  };
+  const up = () => finish(true);
+  const cancel = () => finish(false);
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", cancel);
 }
 
 function renderFileList() {
@@ -558,7 +678,7 @@ function renderFileList() {
     rows.push(el("div", { class: "nav-empty" },
       el("p", { text: tokens.length ? `Nothing matches "${nav.filter.trim()}".` : "No files yet." }),
       tokens.length
-        ? el("button", { class: "tiny", type: "button", text: "Clear filter", onclick: () => showFiles() })
+        ? el("button", { class: "tiny", type: "button", text: "Clear filter", onclick: () => { nav.filter = ""; const input = $("#fileFilter"); if (input) input.value = ""; renderFileList(); } })
         : el("button", { class: "tiny", type: "button", text: "＋ New file", onclick: () => addFileFlow().catch(report) }),
     ));
   }
@@ -587,16 +707,9 @@ function renderFileList() {
     return info.isNew || info.changed;
   }).length + state.deletedFiles.length;
   const summary = $("#fileSummary");
-  summary.textContent = pending ? `${pending} changed` : "";
-  summary.hidden = !pending;
-  if (prefs.filesHeight) box.style.height = prefs.filesHeight + "px";
-  // Keep the open file in view when it changes (a jump, back/forward, a new file), not on every refresh.
-  if (nav.revealed !== state.file) {
-    const active = box.querySelector(".nav-row.active");
-    if (active) {
-      nav.revealed = state.file;
-      box.scrollTop = Math.max(0, active.offsetTop - box.clientHeight / 2 + active.offsetHeight / 2);
-    }
+  if (summary) {
+    summary.textContent = pending ? `${pending} changed` : "";
+    summary.hidden = !pending;
   }
 }
 
@@ -613,7 +726,7 @@ function onNavKey(event) {
   switch (event.key) {
     case "ArrowDown": focusAt(index + 1); break;
     case "ArrowUp":
-      if (index === 0) $("#fileFilter").focus();
+      if (index === 0) $("#fileFilter")?.focus();
       else focusAt(index - 1);
       break;
     case "Home": focusAt(0); break;
@@ -653,10 +766,10 @@ function renderFileHeader() {
   if (!target || !state.doc) return;
   const parts = state.file.split("/");
   const name = parts.pop();
-  const root = el("button", { class: "crumb-link crumb-root", type: "button", title: "Browse all files, logs and certificates (Ctrl+P to search)", onclick: () => openFileBrowser().catch(report), text: "⌂ Files" });
+  const root = el("button", { class: "crumb-link crumb-root", type: "button", title: "All files: search, folders, logs and certificates (Ctrl+P to jump to a file)", onclick: () => openFileBrowser().catch(report), text: "⌂ All files" });
   const dirs = parts.map((part, i) => {
     const folder = parts.slice(0, i + 1).join("/");
-    return el("button", { class: "crumb-link crumb-dir", type: "button", title: `Show ${folder}/ in the file list`, onclick: () => showFiles(folder), text: part });
+    return el("button", { class: "crumb-link crumb-dir", type: "button", title: `Show ${folder}/ in All files`, onclick: () => showFiles(folder), text: part });
   });
   const trail = [root];
   for (const dir of dirs) trail.push(el("span", { class: "crumb-sep", text: "/" }), dir);
@@ -668,13 +781,14 @@ function renderFileHeader() {
   if (file) {
     const info = fileInfo(file);
     if (file.path === state.doc.entrypoint) flags.append(badge("entry", "ENTRY", "Entry file: nginx loads this first"));
-    if (info.isNew) flags.append(badge("new", "NEW", "Not on disk yet. Apply writes it."));
+    if (info.isNew) flags.append(badge("new", "NEW", "Not on disk yet. Save writes it."));
     else if (info.changed) flags.append(badge("changed", "UNSAVED", "Changed since it was loaded or applied"));
   }
-  for (const id of ["navBack", "tbBack"]) $("#" + id).disabled = !nav.back.length;
-  for (const id of ["navFwd", "tbFwd"]) $("#" + id).disabled = !nav.fwd.length;
+  $("#tbBack").disabled = !nav.back.length;
+  $("#tbFwd").disabled = !nav.fwd.length;
   renderTopBar(file);
   renderIncludedBy();
+  if (typeof renderToggle === "function") renderToggle();
   const shown = viewKey();
   if (nav.shown !== shown) {
     nav.shown = shown;
@@ -688,14 +802,11 @@ function renderFileHeader() {
   if (typeof renderViewPane === "function") renderViewPane();
 }
 
-// The way back to the list: clears the filter, opens the folders above the current file (or the
-// folder that was clicked) and puts keyboard focus on that row.
-function showFiles(folder) {
-  if (nav.filter) {
-    nav.filter = "";
-    $("#fileFilter").value = "";
-  }
-  let target = typeof folder === "string" ? folder : "";
+// The way back to the list: opens All files with the folders above the current file (or the folder
+// that was clicked) open and that row in view.
+async function showFiles(folder) {
+  nav.filter = "";
+  const target = typeof folder === "string" ? folder : "";
   if (target) {
     const parts = target.split("/");
     for (let i = 1; i <= parts.length; i++) prefs.collapsed[parts.slice(0, i).join("/")] = false;
@@ -704,25 +815,21 @@ function showFiles(folder) {
   }
   savePrefs();
   nav.revealed = "";
+  if (!(await openFileBrowser())) return;
   renderFileList();
-  const row = target
-    ? nav.rows.find((r) => r.dataset.folder === target)
-    : nav.rows.find((r) => r.classList.contains("active"));
+  const row = target ? nav.rows.find((r) => r.dataset.folder === target) : nav.rows.find((r) => r.dataset.path === state.file);
   if (row) {
-    row.focus();
-    row.scrollIntoView({ block: "nearest" });
-  } else {
-    $("#fileFilter").focus();
+    row.scrollIntoView({ block: "center" });
+    row.classList.add("flash");
+    setTimeout(() => row.classList.remove("flash"), 1400);
   }
 }
 
-// The ⌂ button: the file browser (files, logs, certificates). The brand opens the overview instead.
+// The ⌂ button: All files (files, logs, certificates). The brand opens the overview instead.
 async function goHome() {
-  if (nav.filter) {
-    nav.filter = "";
-    $("#fileFilter").value = "";
-  }
+  nav.filter = "";
   await openFileBrowser();
+  renderFileList();
 }
 
 // ---------------------------------------------------------------- top bar: current file and tabs
@@ -733,7 +840,7 @@ function pathLabel(path) {
   return el("span", {}, parts.length ? el("span", { class: "tb-dir", text: parts.join("/") + "/" }) : null, el("strong", { text: name }));
 }
 
-const VIEW_TITLES = { home: "Overview", files: "Files" };
+const VIEW_TITLES = { home: "Overview", files: "All files" };
 function keyLabel(key) {
   if (key in VIEW_TITLES) return VIEW_TITLES[key];
   if (key.startsWith("log:")) return key.slice(4).split("/").pop();
@@ -946,28 +1053,6 @@ function forgetDeletion(path) {
   delete state.deletedDocs[path];
 }
 
-async function addFileFlow(folder = "") {
-  if (!(await applyDraft())) return;
-  const answer = await ask({
-    title: "New file",
-    message: "Path relative to the nginx config root. The file is only used when an include directive reaches it.",
-    input: true,
-    value: folder ? folder + "/" : "",
-    placeholder: "conf.d/site.conf",
-    ok: "Create",
-  });
-  if (!answer) return;
-  const path = withExtension(answer);
-  checkPath(path);
-  const candidate = clone(state.doc);
-  candidate.files.push({ path, nodes: [] });
-  const valid = await api("/api/document", { document: candidate });
-  forgetDeletion(path);
-  mutate(() => { state.doc = valid; }, `Added ${path}`);
-  await openFile(path);
-  if (!includersOf(path).length) toast(`${path} is not included by any file yet. Add an include directive, or it will not be loaded.`);
-}
-
 async function cloneFile(file) {
   if (!(await applyDraft())) return;
   if (isMainFile(file)) {
@@ -975,7 +1060,7 @@ async function cloneFile(file) {
   }
   const answer = await ask({
     title: `Clone ${file.path}`,
-    message: "The copy gets every block in this file. Change its server_name before applying, or nginx will see two servers for the same names.",
+    message: "The copy gets every block in this file. Change its server_name before saving, or nginx will see two servers for the same names.",
     input: true,
     value: copyName(file.path),
     ok: "Clone",
@@ -1031,6 +1116,8 @@ function moveFileMemory(oldPath, newPath) {
 async function renameFile(file) {
   if (file.path === state.doc.entrypoint) return toast("The entry file cannot be renamed.");
   if (!(await applyDraft())) return;
+  const row = $$("#fileList .nav-row.file").find((item) => item.dataset.path === file.path);
+  if (row) return beginInlineRename(row, file);
   const answer = await ask({
     title: `Rename ${file.path}`,
     message: "Include directives that name this file exactly are updated. Wildcard includes are checked afterwards.",
@@ -1039,7 +1126,22 @@ async function renameFile(file) {
     ok: "Rename",
   });
   if (!answer) return;
-  const newPath = withExtension(answer);
+  await renameFileTo(file, withExtension(answer));
+}
+
+// Moving a file to another folder is a rename of its path, so it shares everything below.
+async function moveFileToFolder(file, folder) {
+  if (file.path === state.doc.entrypoint) return toast("The entry file cannot be moved.");
+  const name = file.path.split("/").pop();
+  const newPath = folder ? folder + "/" + name : name;
+  if (newPath === file.path) return;
+  if (!(await applyDraft())) return;
+  await renameFileTo(file, newPath);
+  revealFile(newPath);
+  renderFileList();
+}
+
+async function renameFileTo(file, newPath) {
   if (newPath === file.path) return;
   checkPath(newPath, file.path);
   const globs = includersOf(file.path).filter((item) => /[*?]/.test(item.node.args[0]));
@@ -1060,6 +1162,7 @@ async function renameFile(file) {
     forgetDeletion(newPath);
   }, `Renamed to ${newPath}` + (updated ? ` · ${updated} include${updated === 1 ? "" : "s"} updated` : ""));
   moveFileMemory(file.path, newPath);
+  renderFileHeader();
   const lost = globs.filter((item) => !globToRegExp(includePattern(item.node.args[0])).test(newPath));
   if (lost.length) {
     toast(`${newPath} is no longer matched by ${[...new Set(lost.map((item) => item.node.args[0]))].join(", ")} in ${[...new Set(lost.map((item) => item.file))].join(", ")}. Add an include for it.`);
@@ -1073,7 +1176,7 @@ async function deleteFile(file) {
   const answer = await ask({
     title: `Delete ${file.path}?`,
     message: (users.length ? `${users.join(", ")} include${users.length === 1 ? "s" : ""} it by name and will fail the checks. ` : "") +
-      "The file is removed from disk when you apply. Until then you can restore it from the list.",
+      "The file is removed from disk when you save. Until then you can restore it from the list.",
     ok: "Delete",
     danger: true,
   });
@@ -1092,7 +1195,7 @@ async function deleteFile(file) {
       state.file = fallback;
       state.selected = null;
     }
-  }, `Deleted ${file.path}${onDisk ? " · removed on apply" : ""}`);
+  }, `Deleted ${file.path}${onDisk ? " · removed on save" : ""}`);
   delete prefs.fileModes[file.path];
   prefs.recent = prefs.recent.filter((item) => item !== file.path);
   prefs.openTabs = prefs.openTabs.filter((item) => item !== file.path);
@@ -1149,7 +1252,7 @@ function quickMatches(query) {
     }
     if (best >= 0) entries.push({ file, domains, score: best, via });
   }
-  const views = [{ key: "home", label: "Overview", hint: "what is running, sites, domains, certificates" }, { key: "files", label: "Files", hint: "browse files, logs and certificates" }];
+  const views = [{ key: "home", label: "Overview", hint: "what is running, sites, domains, certificates" }, { key: "files", label: "All files", hint: "search files, folders, logs and certificates" }];
   for (const log of typeof knownLogs === "function" ? knownLogs() : []) views.push({ key: "log:" + log.id, label: "Log · " + log.id, hint: `${log.group} log` });
   for (const view of views) {
     const score = fuzzy(query, view.label);
@@ -1229,27 +1332,6 @@ function readPrefsForm() {
 // ---------------------------------------------------------------- wiring
 
 function bindFiles() {
-  $("#fileFilter").addEventListener("input", () => {
-    nav.filter = $("#fileFilter").value;
-    renderFileList();
-  });
-  $("#fileFilter").addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      (nav.rows.find((row) => row.classList.contains("file")) || nav.rows[0])?.focus();
-    } else if (event.key === "Enter") {
-      const first = nav.rows.find((row) => row.classList.contains("file"));
-      if (first) openFile(first.dataset.path).catch(report);
-    } else if (event.key === "Escape" && $("#fileFilter").value) {
-      event.preventDefault();
-      $("#fileFilter").value = "";
-      nav.filter = "";
-      renderFileList();
-    }
-  });
-  $("#fileList").addEventListener("keydown", onNavKey);
-  $("#addFileBtn").addEventListener("click", () => addFileFlow().catch(report));
-  $("#btnQuick").addEventListener("click", openQuick);
   $("#tbBack").addEventListener("click", () => navGo(-1).catch(report));
   $("#tbFwd").addEventListener("click", () => navGo(1).catch(report));
   $("#tbHome").addEventListener("click", () => goHome().catch(report));
@@ -1266,8 +1348,6 @@ function bindFiles() {
       openHome().catch(report);
     }
   });
-  $("#navBack").addEventListener("click", () => navGo(-1).catch(report));
-  $("#navFwd").addEventListener("click", () => navGo(1).catch(report));
 
   $("#quickInput").addEventListener("input", () => {
     nav.quickIndex = 0;
@@ -1298,28 +1378,6 @@ function bindFiles() {
     savePrefs();
     renderFileList();
     toast("Remembered views and recent files cleared.");
-  });
-
-  const split = $("#fileSplit");
-  split.addEventListener("pointerdown", (event) => {
-    const list = $("#fileList");
-    const startY = event.clientY;
-    const startHeight = list.getBoundingClientRect().height;
-    const limit = $(".left-panel").clientHeight - 240;
-    split.setPointerCapture(event.pointerId);
-    split.classList.add("dragging");
-    const move = (e) => {
-      prefs.filesHeight = Math.round(Math.max(96, Math.min(limit, startHeight + e.clientY - startY)));
-      list.style.height = prefs.filesHeight + "px";
-    };
-    const up = () => {
-      split.classList.remove("dragging");
-      split.removeEventListener("pointermove", move);
-      split.removeEventListener("pointerup", up);
-      savePrefs();
-    };
-    split.addEventListener("pointermove", move);
-    split.addEventListener("pointerup", up);
   });
 
   document.addEventListener("keydown", (event) => {

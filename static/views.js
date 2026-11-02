@@ -3,7 +3,7 @@
 // The pages that are not a config file: the Overview (brand), the file browser (⌂) and the log viewer.
 // They share the main area with the editor: state.view says which one is showing (see files.js).
 
-const VIEWS = { built: "", home: { data: null, error: "", at: 0, loading: false, testing: false, tab: "enabled" }, logs: { list: [], at: 0, error: "" }, collapsed: new Set() };
+const VIEWS = { built: "", home: { data: null, error: "", at: 0, loading: false, testing: false, tab: "enabled" }, logs: { list: [], at: 0, error: "" } };
 const LOG_OPTS = {};
 let viewTimer = 0;
 
@@ -65,7 +65,7 @@ function renderViewPane() {
     else if (key === "files") buildBrowser(pane);
     else buildLog(pane, key.slice(4));
   } else if (key === "files") {
-    renderBrowserFiles();
+    renderFileList();
   }
   syncTimers();
 }
@@ -117,13 +117,42 @@ function switchButton(on, label, handler) {
   return button;
 }
 
+// Unsaved edits would be lost when the workspace is reloaded from disk, so offer to apply them first.
+async function settleBeforeToggle() {
+  if (!(await applyDraft())) return false;
+  if (!state.dirty && !state.deletedFiles.length) return true;
+  const answer = await ask({
+    title: "Save your changes first?",
+    message: "Turning a file on or off reloads the config from disk, so changes you have not saved would be lost. Save them to nginx now?",
+    ok: "Save and continue",
+  });
+  if (answer !== true) return false;
+  await applyWorkspace();
+  return !state.dirty && !state.deletedFiles.length;
+}
+
+// The file was renamed on disk: reload, and keep its tab, history, view and remembered mode.
+async function reloadAfterRename(oldPath, newPath) {
+  const wasOpen = state.file === oldPath;
+  moveFileMemory(oldPath, newPath);
+  if (wasOpen) state.file = newPath;
+  const back = nav.back.slice();
+  const fwd = nav.fwd.slice();
+  const views = state.fileView;
+  setDocument(await call("GET", "/api/workspace"));
+  nav.back = back.filter(keyExists);
+  nav.fwd = fwd.filter(keyExists);
+  state.fileView = views;
+  renderFileHeader();
+}
+
 // Disabling renames name.conf to name.conf.disabled (tested, reloaded and rolled back by the server).
 async function toggleConfig(path, enable) {
-  if (!(await allowReplace())) return;
+  if (!(await settleBeforeToggle())) return;
   if (!enable) {
     const answer = await ask({
       title: `Disable ${path}?`,
-      message: "nginx stops using it. The file is kept as " + path + ".disabled, nginx is tested and reloaded, and the change is rolled back if the test fails. You can turn it back on from the Overview.",
+      message: "nginx stops using it. The file is kept as " + path + ".disabled, nginx is tested and reloaded, and the change is rolled back if the test fails. You can turn it back on from All files or the Overview.",
       ok: "Disable",
       danger: true,
     });
@@ -138,9 +167,10 @@ async function toggleConfig(path, enable) {
     );
     return;
   }
-  setDocument(await call("GET", "/api/workspace"));
-  toast(enable ? `Enabled ${data.path || path}${data.reloaded ? " · nginx reloaded" : ""}` : `Disabled ${path} · kept as ${data.path || path + ".disabled"}`);
-  if (VIEWS.built === "home" || state.view === "home") await refreshOverview({ quiet: true });
+  const newPath = data.path || (enable ? path.replace(/\.disabled$/, "") : path + ".disabled");
+  await reloadAfterRename(path, newPath);
+  toast(enable ? `Enabled ${newPath}${data.reloaded ? " · nginx reloaded" : ""}` : `Turned off ${path}. It is kept as ${newPath}; turn it back on from All files.`);
+  await refreshOverview({ quiet: true });
 }
 
 // ---------------------------------------------------------------- overview
@@ -169,6 +199,7 @@ async function refreshOverview({ quiet = false, test = false } = {}) {
     home.testing = false;
   }
   if (state.view === "home") paintHome();
+  else if (state.view === "files") { paintDisabledFiles(); paintBrowserCerts(); }
 }
 
 function buildHome(pane) {
@@ -252,10 +283,10 @@ function homeCards(data) {
   const cards = [
     statCard("nginx", nginxValue, nginxSub, { tone: nginxTone, foot: nginxFoot }),
     statCard("Configs", `${counts.enabled || 0} enabled`, `${counts.disabled || 0} disabled · ${counts.files || 0} files`, {
-      tone: counts.disabled ? "" : "", foot: linkButton("See configs", "Jump to the configs list", () => document.getElementById("homeConfigs")?.scrollIntoView({ behavior: "smooth", block: "start" })),
+      tone: counts.disabled ? "" : "", foot: linkButton("See configs", "Jump to the configs list", () => jumpToSection("homeConfigs")),
     }),
     statCard("Domains", String(counts.domains || 0), `${counts.servers || 0} server block${counts.servers === 1 ? "" : "s"}`, {
-      foot: linkButton("See domains", "Jump to the domains list", () => document.getElementById("homeDomains")?.scrollIntoView({ behavior: "smooth", block: "start" })),
+      foot: linkButton("See domains", "Jump to the domains list", () => jumpToSection("homeDomains")),
     }),
     statCard("Certificates", String(certs.total || 0), attention ? `${attention} need${attention === 1 ? "s" : ""} attention` : soonest ? `Soonest: ${soonest.name} · ${soonest.days_left} d` : "None found", {
       tone: attention ? "bad" : certs.total ? "good" : "", foot: linkButton("Open Certificates", "Issue, upload or review certificates", () => openCerts().catch(report)),
@@ -273,6 +304,19 @@ function homeCards(data) {
   const git = gitCard(home.git);
   if (git) cards.push(git);
   return cards;
+}
+
+// Scrolls the Overview page (its own scroll area) to a section and flashes it so the eye finds it.
+function jumpToSection(id) {
+  const pane = $("#viewPane");
+  const section = document.getElementById(id);
+  if (!pane || !section) return;
+  const offset = section.getBoundingClientRect().top - pane.getBoundingClientRect().top - 14;
+  pane.scrollTo({ top: pane.scrollTop + offset, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  section.classList.remove("section-flash");
+  void section.offsetWidth;
+  section.classList.add("section-flash");
+  setTimeout(() => section.classList.remove("section-flash"), 1800);
 }
 
 async function runOverviewTest() {
@@ -391,82 +435,67 @@ function homeActivity(data) {
 // ---------------------------------------------------------------- file browser
 
 function buildBrowser(pane) {
-  const filter = el("input", { id: "browseFilter", class: "view-filter", placeholder: "Filter by file or domain…", "aria-label": "Filter config files", autocomplete: "off", spellcheck: "false" });
-  filter.value = VIEWS.browseFilter || "";
+  const filter = el("input", { id: "fileFilter", class: "view-filter", placeholder: "Filter by file name or domain…", "aria-label": "Filter config files by name or domain", autocomplete: "off", spellcheck: "false" });
+  filter.value = nav.filter || "";
   filter.addEventListener("input", () => {
-    VIEWS.browseFilter = filter.value;
-    renderBrowserFiles();
+    nav.filter = filter.value;
+    renderFileList();
   });
+  filter.addEventListener("keydown", (event) => {
+    const first = nav.rows.find((row) => row.classList.contains("file"));
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      (first || nav.rows[0])?.focus();
+    } else if (event.key === "Enter" && first) {
+      openFile(first.dataset.path).catch(report);
+    } else if (event.key === "Escape" && filter.value) {
+      event.preventDefault();
+      filter.value = "";
+      nav.filter = "";
+      renderFileList();
+    }
+  });
+  const tree = el("div", { id: "fileList", class: "file-list browse-tree", role: "tree", "aria-label": "Config files" });
+  tree.addEventListener("keydown", onNavKey);
   const page = el("div", { class: "view-page" },
-    pageHeader("FILES", "Browse everything", "Config files, logs and certificates in one place",
+    pageHeader("ALL FILES", "All files", "Search and organise config files. Logs and certificates are below.",
       el("button", { type: "button", text: "＋ New file", onclick: () => addFileFlow().catch(report) }),
       el("button", { type: "button", text: "⇪ Import", onclick: () => openImportDialog().catch(report) }),
       el("button", { type: "button", text: "◎ Overview", onclick: () => openHome().catch(report) })),
-    viewSection("Config files", "click a file to open it", el("label", { class: "search-box view-search" }, el("span", { text: "⌕" }), filter), el("div", { id: "browseTree", class: "browse-tree", role: "tree", "aria-label": "Config files" })),
+    viewSection("Config files", "click to open · double-click or F2 to rename · drag a file onto a folder to move it · drop files from your computer onto a folder to import them there",
+      el("div", { class: "browse-bar" },
+        el("label", { class: "search-box view-search" }, el("span", { text: "⌕" }), filter),
+        el("span", { id: "fileSummary", class: "file-summary", hidden: "" })),
+      tree,
+      el("div", { id: "browseDisabled", class: "browse-disabled", hidden: "" })),
     viewSection("Logs", "nginx, this app and certbot", el("div", { id: "browseLogs", class: "browse-logs" })),
     viewSection("Certificates", "", el("div", { id: "browseCerts", class: "browse-certs" })),
   );
   pane.replaceChildren(page);
-  renderBrowserFiles();
+  renderFileList();
   paintBrowserLogs();
   paintBrowserCerts();
+  paintDisabledFiles();
   loadLogList().then(paintBrowserLogs).catch(() => paintBrowserLogs());
-  if (!VIEWS.home.data || Date.now() - VIEWS.home.at > 30000) refreshOverview({ quiet: true }).then(paintBrowserCerts);
+  if (!VIEWS.home.data || Date.now() - VIEWS.home.at > 30000) refreshOverview({ quiet: true }).then(() => { paintBrowserCerts(); paintDisabledFiles(); });
 }
 
-function renderBrowserFiles() {
-  const box = $("#browseTree");
-  if (!box || !state.doc) return;
-  const tokens = (VIEWS.browseFilter || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const infos = new Map(state.doc.files.map((file) => [file.path, fileInfo(file)]));
-  const files = state.doc.files.filter((file) => {
-    if (!tokens.length) return true;
-    const haystack = (file.path + " " + infos.get(file.path).domains.join(" ")).toLowerCase();
-    return tokens.every((token) => haystack.includes(token));
-  });
-  const byName = (a, b) => (a.name || a.path).localeCompare(b.name || b.path, undefined, { numeric: true });
-  const rows = [];
-  const walk = (folder, depth) => {
-    const subs = [...folder.folders.values()].sort(byName);
-    let leaves = [...folder.files].sort(byName);
-    if (depth === 0) leaves = [...leaves.filter((f) => f.path === state.doc.entrypoint), ...leaves.filter((f) => f.path !== state.doc.entrypoint)];
-    const emit = () => leaves.forEach((file) => rows.push(browseFileRow(file, infos.get(file.path), depth)));
-    if (depth === 0) emit();
-    for (const sub of subs) {
-      const open = tokens.length > 0 || !VIEWS.collapsed.has(sub.path);
-      const row = el("button", {
-        class: "browse-row folder", type: "button", role: "treeitem", "aria-expanded": String(open),
-        onclick: () => { if (VIEWS.collapsed.has(sub.path)) VIEWS.collapsed.delete(sub.path); else VIEWS.collapsed.add(sub.path); renderBrowserFiles(); },
-      }, el("span", { class: "nav-twist", text: open ? "▾" : "▸" }), el("span", { class: "folder-name", text: sub.name + "/" }), el("span", { class: "nav-count", text: String(countFiles(sub)) }));
-      row.style.setProperty("--depth", depth);
-      rows.push(row);
-      if (open) walk(sub, depth + 1);
-    }
-    if (depth !== 0) emit();
-  };
-  walk(buildTree(files), 0);
-  if (!rows.length) rows.push(el("div", { class: "view-empty" }, tokens.length ? `Nothing matches "${VIEWS.browseFilter.trim()}".` : "No files yet."));
-  box.replaceChildren(...rows);
-}
-
-function browseFileRow(file, info, depth) {
-  const name = file.path.split("/").pop();
-  const entry = file.path === state.doc.entrypoint;
-  const chips = info.domains.slice(0, 4).map((domain) => el("span", { class: "nav-domain", text: domain }));
-  if (info.domains.length > 4) chips.push(el("span", { class: "nav-more", title: info.domains.slice(4).join(", "), text: `+${info.domains.length - 4}` }));
-  const row = el("button", { class: "browse-row file", type: "button", role: "treeitem", title: file.path, onclick: () => openFile(file.path).catch(report) },
-    el("span", { class: "file-icon", text: "▤" }),
-    el("span", { class: "browse-name", text: name }),
-    entry ? badge("entry", "ENTRY", "Entry file: nginx loads this first") : null,
-    info.tls ? badge("tls", "TLS", "Serves TLS certificates") : null,
-    info.errors ? badge("err", String(info.errors), `${info.errors} problem(s) found by the checks`) : null,
-    !info.errors && info.warnings ? badge("warn", String(info.warnings), `${info.warnings} suggestion(s)`) : null,
-    info.isNew ? badge("new", "NEW", "Not on disk yet. Apply writes it.") : null,
-    info.changed ? el("span", { class: "nav-dot", title: "Unsaved changes" }) : null,
-    el("span", { class: "browse-domains" }, ...(chips.length ? chips : [el("span", { class: "nav-none", text: entry ? "entry · main settings" : isMainFile(file) ? "main settings" : "no server_name" })])),
-  );
-  row.style.setProperty("--depth", depth);
-  return row;
+// The editor only loads files nginx reads, so files that are turned off (name.conf.disabled) are listed here
+// from the overview, each with a switch to turn it back on.
+function paintDisabledFiles() {
+  const box = $("#browseDisabled");
+  if (!box) return;
+  const files = ((VIEWS.home.data && VIEWS.home.data.files) || []).filter((file) => !file.enabled);
+  box.hidden = !files.length;
+  box.replaceChildren(...(files.length ? [
+    el("div", { class: "log-group-title", text: `Turned off (${files.length}) · nginx ignores these` }),
+    ...files.map((file) => el("div", { class: "browse-row off-row" },
+      el("span", { class: "file-icon", text: "▤" }),
+      el("span", { class: "browse-name mono", title: file.path, text: file.path }),
+      badge("off", "OFF", "Disabled: nginx ignores this file"),
+      el("span", { class: "browse-domains muted", text: file.modified || "" }),
+      file.can_toggle !== false ? switchButton(false, `Turn ${file.path} on`, () => toggleConfig(file.path, true).catch(report)) : null)),
+  ] : []));
 }
 
 function paintBrowserLogs() {

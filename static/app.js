@@ -39,15 +39,38 @@ async function api(path, payload) {
   if (!response.ok) throw new Error(errorText(data.error) || `The server answered ${response.status}.`);
   return data;
 }
-function toast(text) { $('#toast').textContent=text; $('#toast').classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5000); }
+function toast(text,tone) { $('#toast').textContent=text; $('#toast').classList.toggle('warn',tone==='warn'); $('#toast').classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),5000); }
 function action(fn) { return async (...args)=> { try { await fn(...args); } catch(error) { reportError(error); } }; }
 function currentFile() { return state.doc.files.find(file=>file.path === state.file); }
 function flatten(nodes, parent=null, out=[]) { for (const node of nodes) { out.push({node,parent}); flatten(node.children,node.id,out); } return out; }
 function locate(id) { for (const file of state.doc.files) { const hit=findIn(file.nodes,id); if(hit) return {...hit,file}; } return null; }
 function findIn(nodes,id,parent=null) { for(let index=0;index<nodes.length;index++){ const node=nodes[index]; if(node.id===id) return {node,nodes,index,parent}; const nested=findIn(node.children,id,node.id); if(nested) return nested; } return null; }
-function newNode(name,args=[],kind='directive',children=[]) { return {id:uid(),kind,name,args,children,text:'',line:null}; }
+function newNode(name,args=[],kind='directive',children=[]) { return {id:uid(),kind,name,args,children,text:'',line:null,end_line:null,inline:false}; }
 function textNode(text) { return {...newNode('',[],'comment'),text}; }
-function renderNodes(nodes,depth=0) { return nodes.map(n=> n.kind==='comment' ? '    '.repeat(depth)+n.text+'\n' : '    '.repeat(depth)+[n.name,...n.args].join(' ')+(n.kind==='block' ? ' {\n'+renderNodes(n.children,depth+1)+'    '.repeat(depth)+'}\n' : ';\n')).join(''); }
+// A comment with inline:true sits on the line of the directive or block before it ("listen 443 ssl;  # note"),
+// or on the opening line of the block when it is that block's first child. Rows own the note that follows them.
+function isInlineNote(nodes,index,hasParent) { const n=nodes[index]; return !!n&&n.kind==='comment'&&n.inline===true&&((index>0&&nodes[index-1].kind!=='comment')||(index===0&&!!hasParent)); }
+function noteAfter(nodes,index) { const n=nodes[index+1]; return n&&nodes[index].kind!=='comment'&&n.kind==='comment'&&n.inline===true?n:null; }
+function headNote(node) { const c=node.kind==='block'&&node.children[0]; return c&&c.kind==='comment'&&c.inline===true?c:null; }
+function spanLength(nodes,index) { return noteAfter(nodes,index)?2:1; }
+function removeSpan(nodes,index) { return nodes.splice(index,spanLength(nodes,index)); }
+function moveSpan(nodes,index,hasParent,direction) {
+  const count=spanLength(nodes,index);let to;
+  if(direction<0){let p=index-1;if(p>=0&&isInlineNote(nodes,p,hasParent)){if(p===0)return false;p--;}if(p<0)return false;to=p;}
+  else{const next=index+count;if(next>=nodes.length)return false;to=index+spanLength(nodes,next);}
+  const moved=nodes.splice(index,count);nodes.splice(to,0,...moved);return true;
+}
+function renderNodes(nodes,depth=0) {
+  const pad='    '.repeat(depth);let out='';
+  nodes.forEach((n,i)=>{
+    if(n.kind==='comment'){if(i>0&&n.inline===true&&nodes[i-1].kind!=='comment'&&out.endsWith('\n'))out=out.slice(0,-1)+'  '+n.text+'\n';else out+=pad+n.text+'\n';return;}
+    const head=pad+[n.name,...n.args].join(' ');
+    if(n.kind!=='block'){out+=head+';\n';return;}
+    const first=headNote(n);
+    out+=head+' {'+(first?'  '+first.text:'')+'\n'+renderNodes(first?n.children.slice(1):n.children,depth+1)+pad+'}\n';
+  });
+  return out;
+}
 function groupFor(node) { return state.palette.find(p=>p.name===node.name)?.group || (state.known.has(node.name)?'Behavior':'Custom'); }
 function decorate(node,group) { const [color,tint]=colors[group]||colors.Custom; node.style.setProperty('--block',color);node.style.setProperty('--tint',tint); }
 function snapshot() { state.history.push(clone(state.doc)); if(state.history.length>70)state.history.shift();state.future=[]; }
@@ -55,7 +78,7 @@ function remember() { try { localStorage.setItem('nginx-workshop-draft',JSON.str
 function changed(message) { state.dirty=true;state.rawDirty=false;state.rendered=null;remember();render();if(message)toast(message); }
 function mutate(fn,message) { snapshot();fn();changed(message); }
 function setDocument(doc,dirty=false) { state.doc=doc;state.revision=doc.revision;chooseStartFile(doc);state.selected=null;state.scopeInfo=null;state.includeLinks={};state.inspectorDraft=null;state.customDraft=null;state.customDrafts={};state.argumentDraft=null;state.basicDirty=false;state.lastCheck=null;state.history=[];state.future=[];state.dirty=dirty;state.rawDirty=false;state.rendered=null;remember();render();afterDocumentLoad(); }
-async function allowReplace() { if(state.dirty || state.rawDirty || state.inspectorDraft || state.customDraft || state.basicDirty || state.argumentDraft) return (await ask({title:'Discard unapplied edits?',message:'Changes you have not applied to nginx will be lost.',ok:'Discard',danger:true}))===true;return true; }
+async function allowReplace() { if(state.dirty || state.rawDirty || state.inspectorDraft || state.customDraft || state.basicDirty || state.argumentDraft) return (await ask({title:'Discard unsaved changes?',message:'Changes you have not saved will be lost.',ok:'Discard',danger:true}))===true;return true; }
 
 // The document is named after the folder it was loaded from; that is not a title, so a folder name shows as a friendly one.
 function documentTitle(name) {
@@ -68,9 +91,9 @@ function render() {
   if(!state.doc.files.some(f=>f.path===state.file))state.file=state.doc.entrypoint;
   if(state.selected&&!locate(state.selected))state.selected=null;
   $('#documentName').value=documentTitle(state.doc.name);$('#documentName').title='Config root: '+($('#configRoot').textContent||'');
-  $('#savedLabel').textContent=state.doc.revision?`REVISION ${state.doc.revision}`:'UNSAVED DRAFT';
-  $('#changeStatus').textContent=state.dirty?'Unsaved changes':'All changes saved';
-  if(!state.doc.revision&&!state.dirty)$('#changeStatus').textContent='Example · save to keep';
+  const onDisk=state.diskFiles&&state.diskFiles.size>0;
+  $('#savedLabel').textContent=state.dirty?'NOT SAVED':state.savedLabel||(onDisk?'ON DISK':state.doc.revision?`REVISION ${state.doc.revision}`:'NOT SAVED');
+  $('#changeStatus').textContent=state.dirty?'Unsaved changes':state.savedStatus||(onDisk||state.doc.revision?'All changes saved':'Example · save to keep');
   $('#fileCount').textContent=`${state.doc.files.length} file${state.doc.files.length===1?'':'s'}`;
   const all=state.doc.files.flatMap(file=>flatten(file.nodes));
   $('#nodeCount').textContent=`${all.filter(n=>n.node.kind!=='comment').length} blocks & directives`;
@@ -115,7 +138,7 @@ function startDrag(data){
   $$('.drop-zone').forEach(zone=>{const parent=zone.dataset.parent||null;const cycle=data.nodeId&&(parent===data.nodeId||(parent&&flatten(node.children).some(n=>n.node.id===parent)));const valid=data.recipe?data.recipe.parsedNodes.every(n=>canPlace(n,parent)):node&&!cycle&&canPlace(node,parent);zone.classList.toggle('snap-valid',valid);zone.classList.toggle('snap-invalid',!valid);zone.textContent=valid?'Snap into '+contextsFor(parent).join(' / '):'';});
 }
 function endDrag(){state.dragData=null;document.body.classList.remove('dragging');$$('.drop-zone').forEach(zone=>{zone.classList.remove('snap-valid','snap-invalid','drag-over');zone.textContent=zone.classList.contains('empty')?'Drop blocks here':'';});$$('.receiving').forEach(node=>node.classList.remove('receiving'));}
-async function selectNode(id){if(!await applyArgument()||!await applyInspector())return;state.selected=id;$$('.node.selected').forEach(n=>n.classList.remove('selected'));$(`[data-node="${CSS.escape(id)}"]`)?.classList.add('selected');renderInspector();renderPalette();$('#canvasHint').textContent='New blocks snap into '+contextsFor(selectedParent()).join(' / ');showRight('inspector');}
+async function selectNode(id){if(!await applyArgument()||!await applyInspector())return;state.selected=id;$$('.node.selected').forEach(n=>n.classList.remove('selected'));$(`[data-node="${CSS.escape(id)}"]`)?.classList.add('selected');renderInspector();renderPalette();$('#canvasHint').textContent='New blocks snap into '+contextsFor(selectedParent()).join(' / ');if($('#library').classList.contains('hidden'))showRight('inspector');}
 async function addTemplate(template,parent=undefined,index=null) {
   if(!await applyDraft())return;
   if(parent===undefined && state.selected) { const hit=locate(state.selected); parent=hit.node.kind==='block'?hit.node.id:hit.parent; }
@@ -139,19 +162,56 @@ function dropZone(parent,index,empty=false) {
     if(parent===hit.node.id || (parent&&flatten(hit.node.children).some(n=>n.node.id===parent)))throw new Error('A block cannot be moved inside itself.');
     if(!canPlace(hit.node,parent))throw new Error(placementMessage(hit.node,parent));
     const target=parent?locate(parent).node.children:currentFile().nodes;
-    let position=index;
-    if(target===hit.nodes&&hit.index<position)position--;
-    mutate(()=>{hit.nodes.splice(hit.index,1);target.splice(position,0,hit.node);state.selected=hit.node.id;},'Block moved');
+    let position=index;const count=spanLength(hit.nodes,hit.index);
+    if(target===hit.nodes&&hit.index<position)position-=count;
+    mutate(()=>{const moved=hit.nodes.splice(hit.index,count);target.splice(position,0,...moved);state.selected=hit.node.id;},'Block moved');
   }));
   return zone;
 }
 function blockList(nodes,parent=null) {
-  const container=el('div',{class:'node-list'});
-  if(!nodes.length) {container.append(dropZone(parent,0,true));return container;}
-  for(let index=0;index<nodes.length;){container.append(dropZone(parent,index));const group=visualGroup(nodes,index,parent);if(group){container.append(groupElement(group,parent));index+=group.nodes.length;}else{container.append(nodeElement(nodes[index]));index++;}}
+  const container=el('div',{class:'node-list'}),hasParent=!!parent;
+  if(!nodes.some((n,i)=>!isInlineNote(nodes,i,hasParent))) {container.append(dropZone(parent,nodes.length,true));return container;}
+  // Inline comments are shown on the row that owns them, so they have no row (or drop zone) of their own.
+  for(let index=0;index<nodes.length;){
+    if(isInlineNote(nodes,index,hasParent)){index++;continue;}
+    container.append(dropZone(parent,index));const group=visualGroup(nodes,index,parent);
+    if(group){container.append(groupElement(group,parent));index+=group.nodes.length;}else{container.append(nodeElement(nodes[index],noteAfter(nodes,index)));index++;}
+  }
   container.append(dropZone(parent,nodes.length));return container;
 }
-function nodeElement(node) {
+// The "# comment" on a row: click to edit, empty text removes it. `after` is the comment node following the row.
+function noteEditor(node,comment,anchor,after) {
+  const input=el('input',{class:'note-input',value:comment?comment.text.replace(/^#+\s?/,''):'',placeholder:'Comment, e.g. Listen on https','aria-label':'Comment for '+(node.name||'line'),draggable:'false'});
+  let done=false;
+  const finish=async save=>{
+    if(done)return;done=true;
+    const text=input.value.replace(/[\r\n]+/g,' ').trim();
+    const previous=comment?comment.text.replace(/^#+\s?/,''):'';
+    if(!save||text===previous){input.replaceWith(anchor);return;}
+    if(!await applyDraft()){input.replaceWith(anchor);return;}
+    mutate(()=>{
+      const hit=locate(node.id),existing=comment&&locate(comment.id);
+      if(existing&&text){existing.node.text=text.startsWith('#')?text:'# '+text;}
+      else if(existing){existing.nodes.splice(existing.index,1);}
+      else if(text){hit.nodes.splice(hit.index+1,0,{...newNode('',[],'comment'),text:text.startsWith('#')?text:'# '+text,inline:true});}
+      state.selected=node.id;
+    },text?(comment?'Comment updated':'Comment added'):'Comment removed');
+  };
+  input.addEventListener('click',event=>event.stopPropagation());
+  input.addEventListener('mousedown',event=>event.stopPropagation());
+  input.addEventListener('keydown',event=>{event.stopPropagation();if(event.key==='Enter'){event.preventDefault();finish(true);}if(event.key==='Escape'){event.preventDefault();finish(false);}});
+  input.addEventListener('blur',()=>finish(true));
+  anchor.replaceWith(input);input.focus();input.select();
+}
+function noteControls(node,after) {
+  const notes=[headNote(node),after].filter(Boolean);
+  if(!notes.length){
+    const add=el('button',{class:'note-add',type:'button',title:'Add a comment on this line','aria-label':'Add comment to '+node.name,text:'# Add comment'});
+    add.addEventListener('click',event=>{event.stopPropagation();noteEditor(node,null,add,after);});return [add];
+  }
+  return notes.map(comment=>{const chip=el('button',{class:'node-note',type:'button',title:'Edit this comment (clear it to remove)',text:comment.text});chip.addEventListener('click',event=>{event.stopPropagation();noteEditor(node,comment,chip,after);});return chip;});
+}
+function nodeElement(node,after=null) {
   const group=groupFor(node),custom=!state.known.has(node.name)&&node.kind!=='comment';
   const wrapper=el('article',{class:`node node-${node.kind}${state.selected===node.id?' selected':''}`,'data-node':node.id});decorate(wrapper,group);
   const head=el('div',{class:'node-head',draggable:'false',onclick:action(async event=>{event.stopPropagation();await selectNode(node.id);})});
@@ -162,6 +222,7 @@ function nodeElement(node) {
     const args=el('span',{class:'node-args'},node.args.map((arg,index)=>argumentControl(node,index,arg)));
     if(!['server','http','stream','mail','events'].includes(node.name))args.append(el('button',{class:'argument-add',title:'Add an argument','aria-label':`Add argument to ${node.name}`,onclick:action(async event=>{event.stopPropagation();if(!await applyDraft())return;mutate(()=>{locate(node.id).node.args.push('""');state.selected=node.id;});}),text:'+'}));
     head.append(args);if(custom)head.append(el('span',{class:'node-badge',text:'CUSTOM'}));else if(node.kind==='block')head.append(el('span',{class:'node-badge',text:'SCOPE'}));
+    head.append(...noteControls(node,after));
   }
   head.append(inlineActions(node));
   head.addEventListener('dragstart',event=>{if(event.target.tagName==='INPUT'||event.target.tagName==='SELECT'){event.preventDefault();return;}event.stopPropagation();event.dataTransfer.setData('application/json',JSON.stringify({nodeId:node.id}));event.dataTransfer.effectAllowed='move';startDrag({nodeId:node.id});});
@@ -176,7 +237,7 @@ function argumentControl(node,index,arg){
   const attrs={class:'argument argument-input',value:arg,'aria-label':`${node.name} argument ${index+1}`,title:'Edit directly. Keep Nginx quotes, or type a value; spaces will be quoted.',draggable:'false'};
   const input=boolean?el('select',attrs,['on','off'].map(value=>el('option',{value,text:value}))):el('input',attrs);
   input.value=arg;
-  if(!boolean)input.style.width=Math.max(4,Math.min(arg.length+2,55))+'ch';
+  if(!boolean)input.style.width=`calc(${Math.max(4,Math.min(arg.length+2,55))}ch + 6px)`;
   input.addEventListener('click',event=>event.stopPropagation());
   input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();input.blur();}if(event.key==='Escape'){input.value=arg;input.blur();}});
   input.addEventListener('input',()=>{state.argumentDraft={id:node.id,index,value:input.value};$('#changeStatus').textContent='Editing block value';});
@@ -199,13 +260,13 @@ function renderCanvas() {
     canvas.append(blockList(currentFile().nodes));
     canvas.append(el('button',{class:'add-custom',onclick:action(()=>addTemplate({name:'custom_directive',args:['value'],kind:'directive'},null)),text:'＋ Add a custom directive to this scope'}));
     $('#canvasHint').textContent='Edit values on the blocks · drag the grip to a valid snap target';
-  } else if(state.mode==='basic') {renderBasicV2(canvas);$('#canvasHint').textContent='Simple controls + Advanced code · apply or change views to keep edits';}
+  } else if(state.mode==='basic') {renderBasicV2(canvas);$('#canvasHint').textContent='Everyday settings as switches and fields · changes go into the draft straight away';}
   else {
     const json=state.mode==='json';
     const wrap=el('div',{class:'raw-wrap'},el('div',{class:'raw-heading'},el('h3',{text:json?'Stored document · read only':'Custom Nginx source'}),json?null:el('button',{class:'primary',id:'applySourceBtn',onclick:action(async()=>{await applyDraft();}),text:'Apply changes'})));
     const textarea=el('textarea',{id:'sourceEditor',class:'raw-editor',spellcheck:'false','aria-label':json?'Document JSON':'Nginx configuration',value:json?JSON.stringify(state.doc,null,2):renderNodes(currentFile().nodes)});
     textarea.readOnly=json;
-    textarea.addEventListener('input',()=>{state.rawDirty=true;$('#changeStatus').textContent='Unapplied source changes';scheduleAutoCheck();});
+    textarea.addEventListener('input',()=>{state.rawDirty=true;$('#changeStatus').textContent='Unsaved source changes';scheduleAutoCheck();});
     textarea.addEventListener('keydown',event=>{if(!json&&event.key==='Tab'){event.preventDefault();textarea.setRangeText('    ',textarea.selectionStart,textarea.selectionEnd,'end');state.rawDirty=true;}});
     wrap.append(textarea,el('p',{class:'raw-notice',text:json?'Internal storage format, shown for inspection. Make changes in Basic, Blocks, or Nginx.':'Apply parses this file into blocks. Unsupported directives remain editable in their original scope. Whitespace is formatted on export.'}));canvas.append(wrap);
     $('#canvasHint').textContent='Source changes are parsed before changing views';
@@ -229,7 +290,7 @@ function renderInspector() {
   const box=$('#inspector');box.replaceChildren();
   const hit=state.selected&&locate(state.selected);
   if(!hit) {
-    box.append(el('div',{class:'empty-inspector'},el('div',{class:'empty-icon',text:'⌖'}),el('h3',{text:'Every directive has a place.'}),el('p',{class:'hint',text:'Select a block to edit its Nginx source, move it, or add children. Unknown directives stay visible as custom blocks.'}),el('div',{class:'metadata-list'},el('div',{},'Current file ',el('span',{text:state.file})),el('div',{},'Entry context ',el('span',{text:state.doc.context})),el('div',{},'Deployment intent ',el('span',{text:state.doc.enabled?'enabled':'disabled'}))),el('hr',{class:'inspector-divider'}),el('p',{class:'hint',text:'Need a starting point? Add a server block, then add listen, server_name and a location inside it.'})));return;
+    box.append(el('div',{class:'empty-inspector'},el('div',{class:'empty-icon',text:'⌖'}),el('h3',{text:'Every directive has a place.'}),el('p',{class:'hint',text:'Select a block to edit its Nginx source, move it, or add children. Unknown directives stay visible as custom blocks.'}),el('div',{class:'metadata-list'},el('div',{},'Current file ',el('span',{text:state.file})),el('div',{},'Entry context ',el('span',{text:state.doc.context})),el('div',{},'nginx reads it ',el('span',{text:/\.disabled$/.test(state.file)?'no, it is switched off':'yes'}))),el('hr',{class:'inspector-divider'}),el('p',{class:'hint',text:'Need a starting point? Add a server block, then add listen, server_name and a location inside it.'})));return;
   }
   const node=hit.node,custom=!state.known.has(node.name)&&node.kind!=='comment';
   box.append(el('div',{class:'selection-type',text:node.kind==='comment'?'Comment':custom?'Custom directive':node.kind==='block'?'Configuration block':'Nginx directive'}),el('h2',{class:'inspector-title',text:node.name||'comment'}),el('span',{class:'type-tag',text:custom?'PRESERVED AS CUSTOM':groupFor(node).toUpperCase()}));
@@ -238,12 +299,12 @@ function renderInspector() {
   if(node.name==='include'){const info=el('div',{class:'include-info','data-include':node.id});renderIncludeInfo(info,node);box.append(info);}
   if(node.name==='listen'&&node.args.includes('http2'))box.append(el('button',{class:'full-button',onclick:action(async()=>{let server=hit;while(server&&server.node.name!=='server')server=server.parent?locate(server.parent):null;if(!server)throw new Error('No parent HTTP server found.');const doc=await api('/api/modernize-http2',{document:state.doc,node_id:server.node.id});mutate(()=>{state.doc=doc;},'Converted legacy listen http2');}),text:'Convert to http2 on; ↗'}));
   const source=el('textarea',{id:'nodeSource',class:'inspector-source',rows:node.kind==='block'?11:5,spellcheck:'false',value:state.inspectorDraft?.id===node.id?state.inspectorDraft.text:renderNodes([node]).trimEnd(),'aria-label':'Selected block source'});
-  source.addEventListener('input',()=>{state.inspectorDraft={id:node.id,text:source.value};$('#changeStatus').textContent='Unapplied block changes';scheduleAutoCheck();});
+  source.addEventListener('input',()=>{state.inspectorDraft={id:node.id,text:source.value};$('#changeStatus').textContent='Unsaved block changes';scheduleAutoCheck();});
   box.append(el('label',{},'BLOCK SOURCE',source));
   box.append(el('button',{class:'primary full-button',onclick:action(async()=>{state.inspectorDraft={id:node.id,text:source.value};await applyInspector();}),text:'Apply block changes'}));
-  box.append(el('div',{class:'node-actions'},el('button',{title:'Move up',disabled:hit.index===0,onclick:()=>mutate(()=>{hit.nodes.splice(hit.index-1,0,hit.nodes.splice(hit.index,1)[0]);}),text:'↑ Up'}),el('button',{title:'Move down',disabled:hit.index===hit.nodes.length-1,onclick:()=>mutate(()=>{hit.nodes.splice(hit.index+1,0,hit.nodes.splice(hit.index,1)[0]);}),text:'↓ Down'}),el('button',{onclick:()=>mutate(()=>{const copy=clone(node);reidentify(copy);hit.nodes.splice(hit.index+1,0,copy);state.selected=copy.id;},'Block duplicated'),text:'Duplicate'})));
+  box.append(el('div',{class:'node-actions'},el('button',{title:'Move up',disabled:hit.index===0||(hit.index===1&&isInlineNote(hit.nodes,0,!!hit.parent)),onclick:()=>mutate(()=>{moveSpan(hit.nodes,hit.index,!!hit.parent,-1);}),text:'↑ Up'}),el('button',{title:'Move down',disabled:hit.index+spanLength(hit.nodes,hit.index)>=hit.nodes.length,onclick:()=>mutate(()=>{moveSpan(hit.nodes,hit.index,!!hit.parent,1);}),text:'↓ Down'}),el('button',{onclick:()=>mutate(()=>{const copies=hit.nodes.slice(hit.index,hit.index+spanLength(hit.nodes,hit.index)).map(n=>{const c=clone(n);reidentify(c);return c;});hit.nodes.splice(hit.index+copies.length,0,...copies);state.selected=copies[0].id;},'Block duplicated'),text:'Duplicate'})));
   if(node.kind==='block')box.append(el('button',{class:'full-button',onclick:action(addCustom),text:'＋ Add custom child'}));
-  box.append(el('hr',{class:'inspector-divider'}),el('div',{class:'metadata-list'},el('div',{},'Scope ',el('span',{text:hit.parent?locate(hit.parent).node.name:state.doc.context})),el('div',{},'Source ',el('span',{text:hit.file.path+(node.line?`:${node.line}`:'')}))),el('button',{class:'danger full-button',onclick:()=>mutate(()=>{hit.nodes.splice(hit.index,1);state.selected=null;},'Block removed'),text:node.kind==='block'?'Delete block and children':'Delete directive'}));
+  box.append(el('hr',{class:'inspector-divider'}),el('div',{class:'metadata-list'},el('div',{},'Scope ',el('span',{text:hit.parent?locate(hit.parent).node.name:state.doc.context})),el('div',{},'Source ',el('span',{text:hit.file.path+(node.line?`:${node.line}`:'')}))),el('button',{class:'danger full-button',onclick:()=>mutate(()=>{removeSpan(hit.nodes,hit.index);state.selected=null;},'Block removed'),text:node.kind==='block'?'Delete block and children':'Delete directive'}));
 }
 async function applyInspector(){
   const draft=state.inspectorDraft;if(!draft)return true;
@@ -266,7 +327,7 @@ function renderSettings() {
 let previewTimer;
 function schedulePreview() {clearTimeout(previewTimer);const version=++state.renderVersion;previewTimer=setTimeout(async()=>{try{const data=await api('/api/render',{document:state.doc});if(version!==state.renderVersion)return;const graphChanged=JSON.stringify(state.includeLinks)!==JSON.stringify(data.includes||{});state.rendered=data;state.scopeInfo=data.file_contexts;state.includeLinks=data.includes||{};if(graphChanged&&state.mode==='basic'&&!state.basicDirty&&!$('#canvas').contains(document.activeElement))renderCanvas();renderPalette();renderPreview();refreshIncludeInfo();$('#contextLabel').textContent=contextsFor(null).join(' / ').toUpperCase()+' CONTEXT';}catch(error){if(version===state.renderVersion)toast(error.message);}},120);}
 function renderPreview() {if(!state.rendered)return;const effective=$('#previewType').value==='effective';$('#codePreview').textContent=effective?state.rendered.effective:state.rendered.files[state.file];$('#includeWarning').textContent=effective&&state.rendered.include_issues.length?'Incomplete effective view: '+state.rendered.include_issues.map(i=>i.message).join('; '):effective?'Includes expanded in place. File boundaries remain in the document.':'Generated directly from this file’s ordered blocks.';}
-function showRight(which) {$$('.right-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.right===which));['inspector','preview','settings'].forEach(id=>$('#'+id).classList.toggle('hidden',id!==which));if(which==='preview')renderPreview();}
+function showRight(which) {$$('.right-tabs button').forEach(b=>b.classList.toggle('active',b.dataset.right===which));['inspector','preview','library','settings'].forEach(id=>$('#'+id).classList.toggle('hidden',id!==which));if(which==='preview')renderPreview();}
 function undo(redo=false) {if(state.rawDirty||state.inspectorDraft){toast('Apply source changes before using history.');return;}const from=redo?state.future:state.history,to=redo?state.history:state.future;if(!from.length)return;to.push(clone(state.doc));state.doc=from.pop();state.doc.revision=state.revision;state.selected=null;changed(redo?'Redone':'Undone');}
 
 async function saveDraft() {if(!await applyDraft())return;state.doc.revision=state.revision;const saved=await api('/api/library',{document:state.doc});state.doc=saved;state.revision=saved.revision;state.dirty=false;remember();render();toast(`Saved revision ${saved.revision}`);}
@@ -300,7 +361,7 @@ $$('.right-tabs button').forEach(button=>button.addEventListener('click',()=>sho
 $$('[data-close]').forEach(button=>button.addEventListener('click',()=>$('#'+button.dataset.close).close()));
 $('#undoBtn').addEventListener('click',()=>undo());$('#redoBtn').addEventListener('click',()=>undo(true));
 $('#saveBtn').addEventListener('click',action(()=>applyWorkspace()));$('#validateBtn').addEventListener('click',action(runValidation));
-$('#previewType').addEventListener('change',renderPreview);$('#copyBtn').addEventListener('click',action(async()=>{await navigator.clipboard.writeText($('#codePreview').textContent);toast('Copied generated config');}));
+$('#previewType').addEventListener('change',renderPreview);$('#copyBtn').addEventListener('click',action(async()=>{await copyText($('#codePreview').textContent);}));
 
 
 $('#newBtn').addEventListener('click',action(async()=>{

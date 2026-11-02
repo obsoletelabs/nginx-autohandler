@@ -1,6 +1,6 @@
 "use strict";
 
-// The shell around the Workshop editor: apply to nginx, history, settings, certificates,
+// The shell around the Workshop editor: save (write, test, reload), history, settings, certificates,
 // DNS, and the nginx test and reload buttons. Uses the editor's own toast, api and document
 // functions from app.js. Everything here is in-app; no browser dialogs.
 
@@ -12,8 +12,15 @@ const SHELL = {
 
 // ---------------------------------------------------------------- requests
 
+// Requests that become background tasks: the Tasks button checks again at once.
+const TASK_URLS = /^\/api\/(certs\/(issue|reissue|delete|selfsigned)|git\/sync|dns\/(sync|set-ip)|workspace\/apply)/;
+function nudgeTasksFor(url) {
+  if (TASK_URLS.test(String(url).split("?")[0]) && typeof nudgeTasks === "function") nudgeTasks();
+}
+
 // The editor's api() only POSTs; these calls need GET, PUT and the CSRF header on writes.
 async function call(method, url, body) {
+  nudgeTasksFor(url);
   const options = { method, headers: { "X-Requested-With": "nginx-autohandler" } };
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
@@ -22,6 +29,20 @@ async function call(method, url, body) {
   const response = await fetchRetry(url, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(errorText(data.error) || `The server answered ${response.status}.`);
+  return data;
+}
+
+// Like call(), but a refusal (4xx) is returned instead of thrown, so the caller can read its fields.
+async function callAny(method, url, body) {
+  nudgeTasksFor(url);
+  const options = { method, headers: { "X-Requested-With": "nginx-autohandler" } };
+  if (body !== undefined) {
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetchRetry(url, options);
+  const data = await response.json().catch(() => ({}));
+  data.http_status = response.status;
   return data;
 }
 
@@ -85,39 +106,107 @@ function showResult(title, eyebrow, lines) {
   $("#resultDialog").showModal();
 }
 
-// ---------------------------------------------------------------- apply
+// ---------------------------------------------------------------- save
 
-async function applyWorkspace() {
-  if (!(await applyDraft())) return;
-  const result = await call("POST", "/api/workspace/apply", { document: state.doc, delete: state.deletedFiles });
+const SAVE = { busy: false };
+
+function setSaving(busy, label) {
+  SAVE.busy = busy;
+  const button = $("#saveBtn");
+  button.disabled = busy;
+  button.textContent = busy ? label || "Saving…" : "Save";
+}
+
+function clearSaveNotice() {
+  const box = $("#saveNotice");
+  if (box) box.hidden = true;
+}
+
+// Saved, but nginx was not reloaded: amber, with the reason and the files that stopped the reload.
+function showSaveNotice(result, files) {
+  const box = $("#saveNotice");
+  const blocked = result.blocked_by_other_files || [];
+  const root = (state.doc && state.doc.prefix ? state.doc.prefix : "").replace(/\/+$/, "");
+  const relative = (path) => (root && path.startsWith(root + "/") ? path.slice(root.length + 1) : path);
+  const inDocument = (path) => state.doc.files.some((file) => file.path === relative(path));
+  box.replaceChildren(
+    el("span", { class: "notice-mark", "aria-hidden": "true", text: "!" }),
+    el("div", { class: "notice-text" },
+      el("strong", { text: `Saved ${files}, but nginx was not reloaded.` }),
+      el("p", { text: result.warning || "nginx is still running the previous configuration." }),
+      blocked.length
+        ? el("div", { class: "notice-files" },
+          el("span", { text: blocked.length === 1 ? "The problem is in a file you did not change:" : "The problems are in files you did not change:" }),
+          ...blocked.map((path) => {
+            const here = inDocument(path);
+            return here
+              ? el("button", { class: "tiny", type: "button", title: `Open ${relative(path)}`, onclick: () => openFile(relative(path)).catch(report), text: relative(path) })
+              : el("code", { title: "Outside the files this editor shows", text: path });
+          }))
+        : null,
+    ),
+    el("button", { class: "tiny", type: "button", "aria-label": "Dismiss", title: "Dismiss", onclick: clearSaveNotice, text: "✕" }),
+  );
+  box.hidden = false;
+}
+
+async function applyWorkspace(certificateNames) {
+  if (SAVE.busy) return false;
+  if (!(await applyDraft())) return false;
+  const body = { document: state.doc, delete: state.deletedFiles };
+  if (certificateNames) body.certificate_names = certificateNames;
+  setSaving(true, certificateNames ? "Issuing certificate…" : "Saving…");
+  let result;
+  try {
+    result = await callAny("POST", "/api/workspace/apply", body);
+  } finally {
+    setSaving(false);
+  }
+  if (result.needs_certificates && result.needs_certificates.length) {
+    const names = await certificateNamesDialog(result.needs_certificates, certificateNames);
+    if (!names) return false;
+    return applyWorkspace(names);
+  }
+  if (result.error && result.ok === undefined) throw new Error(errorText(result.error) || `The server answered ${result.http_status}.`);
   const removed = result.deleted || [];
-  const files = [...result.changed, ...removed.map((path) => path + " (removed)")].join(", ") || "nothing";
+  const files = [...(result.changed || []), ...removed.map((path) => path + " (removed)")].join(", ") || "nothing";
 
   if (!result.ok) {
+    clearSaveNotice();
     $("#validationStatus").textContent = "nginx rejected the change";
-    showProblem("Not applied", "NGINX TEST FAILED", `nginx rejected the change to ${files}. Every file is back as it was.`, result.output || "No output from nginx.");
-    return;
+    showProblem("Not saved", "NGINX TEST FAILED", `nginx rejected the change to ${files}. Every file is back as it was.`, result.output || "No output from nginx.");
+    return false;
   }
   if (!result.saved) {
-    toast("Nothing to apply. The files already match.");
+    toast("Nothing to save. The files already match.");
     filesApplied();
     renderFileHeader();
-    return;
+    return true;
   }
 
   state.dirty = false;
   filesApplied();
   renderFileHeader();
-  $("#savedLabel").textContent = "APPLIED";
-  $("#changeStatus").textContent = "Applied to nginx";
-  const lines = [`Wrote ${files}.`];
-  if (result.reloaded) lines.push("nginx reloaded.");
-  if (result.dns) {
-    if (result.dns.error) lines.push("DNS: " + result.dns.error);
-    else for (const [domain, outcome] of Object.entries(result.dns.results)) lines.push(`DNS ${domain}: ${outcome}`);
+  const reloaded = result.reloaded !== false;
+  state.savedLabel = reloaded ? "SAVED" : "SAVED, NOT RELOADED";
+  state.savedStatus = reloaded ? "Saved and reloaded" : "Saved, not reloaded";
+  $("#savedLabel").textContent = state.savedLabel;
+  $("#changeStatus").textContent = state.savedStatus;
+  if (reloaded) {
+    clearSaveNotice();
+    toast(`Saved ${(result.changed || []).length} file(s)` + (removed.length ? `, removed ${removed.length}` : "") + " and reloaded nginx.");
+  } else {
+    showSaveNotice(result, files);
+    toast("Saved, but nginx was not reloaded. See the notice above the editor.", "warn");
   }
-  toast(`Applied ${result.changed.length} file(s)` + (removed.length ? `, removed ${removed.length}` : "") + (result.reloaded ? " and reloaded nginx." : "."));
-  if (result.dns) showResult("Applied", "DNS UPDATED", lines);
+  if (result.dns) {
+    const lines = [`Wrote ${files}.`];
+    if (result.dns.error) lines.push("DNS: " + result.dns.error);
+    else for (const [domain, outcome] of Object.entries(result.dns.results || {})) lines.push(`DNS ${domain}: ${outcome}`);
+    showResult("Saved", result.dns.error ? "DNS NOT UPDATED" : "DNS UPDATED", lines);
+  }
+  if (VIEWS.built === "home") refreshOverview({ quiet: true });
+  return true;
 }
 
 // ---------------------------------------------------------------- history
@@ -378,10 +467,25 @@ async function reissueCert(cert, button) {
   }
 }
 
+// Files in the editor whose ssl_certificate points at this certificate.
+function certUsers(cert) {
+  const users = new Set();
+  const marks = [`/live/${cert.name}/`, cert.path, cert.key_path].filter(Boolean);
+  for (const file of state.doc ? state.doc.files : []) {
+    walkNodes(file.nodes, (node) => {
+      if (node.kind === "directive" && (node.name === "ssl_certificate" || node.name === "ssl_certificate_key") && marks.some((mark) => (node.args[0] || "").includes(mark))) users.add(file.path);
+    });
+  }
+  return [...users];
+}
+
 async function deleteCert(cert) {
+  const users = certUsers(cert);
   const answer = await ask({
     title: `Delete ${cert.name}?`,
-    message: "The certificate and its key are removed from this host. A server that still points at these files will fail the nginx test until you change it.",
+    message: "The certificate and its key are removed from this host." + (users.length
+      ? ` Still used by ${users.join(", ")}: those servers will fail the nginx test until you point them at another certificate.`
+      : " No config in the editor uses it."),
     ok: "Delete",
     danger: true,
   });

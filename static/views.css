@@ -147,9 +147,9 @@ body.in-view .document-subtitle { display: none; }
 .import-mode input[type="radio"], .import-mode input[type="checkbox"], #importBody .check input { width: auto; flex: none; margin: 0; }
 .import-source { border-color: color-mix(in srgb, var(--ink) 28%, var(--line)); }
 
-/* Pages use the whole width: the file tree and the inspector step aside while one is showing. */
+/* Pages use the whole width: the inspector steps aside while one is showing. */
 body.in-view .workspace { grid-template-columns: minmax(0, 1fr) !important; }
-body.in-view .left-panel, body.in-view .right-panel { display: none; }
+body.in-view .right-panel { display: none; }
 
 /* Log viewer. */
 .log-page { padding-top: 12px; gap: 10px; }
@@ -169,3 +169,18 @@ body.in-view .left-panel, body.in-view .right-panel { display: none; }
 .log-toolbar .log-toggle input[type="checkbox"] { width: 14px; height: 14px; margin: 0; flex: none; }
 .log-tail { line-height: 1.6; font-size: 12px; }
 @media (max-width: 1050px) { .log-layout { grid-template-columns: 1fr; } .log-toolbar { flex-wrap: wrap; } .log-toolbar .search-box { flex-basis: 100%; } }
+
+.view-section.section-flash { animation: section-flash 1.6s ease-out; border-radius: 10px; }
+@keyframes section-flash { 0%, 35% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--orange) 30%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+
+/* All files: filter row and a slimmer document bar while a page is showing. */
+.browse-bar .view-search { flex: 0 1 420px; width: 420px; max-width: 100%; margin: 0; }
+.browse-bar .view-search input { font-size: 12.5px; }
+body.in-view .document-title, body.in-view .document-subtitle, body.in-view #historyBtn, body.in-view #toggleBtn { display: none; }
+body.in-view .document-bar { padding-top: 10px; padding-bottom: 10px; }
+
+.browse-disabled { margin-top: 12px; display: flex; flex-direction: column; border: 1px dashed var(--line); border-radius: 10px; padding: 4px 4px 6px; }
+.browse-disabled[hidden] { display: none; }
+.off-row { cursor: default; }
+.off-row .browse-name { color: var(--muted); font-weight: 500; }
+.off-row:hover { background: transparent; }

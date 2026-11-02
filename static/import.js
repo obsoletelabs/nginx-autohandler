@@ -1,17 +1,35 @@
 "use strict";
 
 // Import: bring a folder, several files or a .zip into the workspace as a draft. A summary comes first
-// (what will be added, what was skipped and why, what already exists); nothing reaches disk until Apply.
+// (what will be added, what was skipped and why, what already exists); nothing reaches disk until Save.
 
 const IMPORT_LIMITS = { files: 2000, totalBytes: 10 * 1024 * 1024, fileBytes: 2 * 1024 * 1024, zipBytes: 30 * 1024 * 1024 };
 const SKIP_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "ico", "svg", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "tar", "so", "bin", "exe", "dll", "woff", "woff2", "ttf", "mp3", "mp4",
   "md", "markdown", "json", "yml", "yaml", "sh", "py", "js", "css", "html", "htm", "log", "lock", "pem", "key", "crt", "csr",
 ]);
-const IMP = { files: {}, skipped: [], source: "", stripped: "", mode: "merge", overwrite: false, busy: false, error: "" };
+// `base` holds the files under their paths inside the import; `files` is the same set under the folder the
+// user picked ("Put the files in"), which is what is checked against the document and written.
+const IMP = { base: {}, files: {}, dest: "", picker: null, skipped: [], source: "", stripped: "", mode: "merge", overwrite: false, busy: false, error: "" };
 
 function importReset() {
-  Object.assign(IMP, { files: {}, skipped: [], source: "", stripped: "", mode: "merge", overwrite: false, busy: false, error: "" });
+  Object.assign(IMP, { base: {}, files: {}, dest: "", picker: null, skipped: [], source: "", stripped: "", mode: "merge", overwrite: false, busy: false, error: "" });
+}
+
+// Where the files go unless the user says otherwise: the import's own nginx.conf or folder layout means
+// the config root; a dropped conf.d-like folder keeps its name; loose files and plain zips go to conf.d.
+function defaultImportDest(files, stripped) {
+  const paths = Object.keys(files);
+  if (paths.includes("nginx.conf")) return "";
+  if (paths.some((path) => path.includes("/") && KNOWN_FOLDERS.includes(path.split("/")[0]))) return "";
+  if (stripped && KNOWN_FOLDERS.includes(stripped)) return stripped;
+  return DEFAULT_FOLDER;
+}
+
+function applyImportDest() {
+  const out = {};
+  for (const [path, text] of Object.entries(IMP.base)) out[IMP.dest ? IMP.dest + "/" + path : path] = text;
+  IMP.files = out;
 }
 
 function openImportDialog() {
@@ -48,10 +66,14 @@ async function importFromFiles(list, { folder }) {
   let total = 0;
   for (const file of entries) {
     let path = file.name;
-    if (folder && file.webkitRelativePath) {
+    if (file.webkitRelativePath && (folder || file.webkitRelativePath.includes("/"))) {
       const parts = file.webkitRelativePath.split("/");
-      stripped = parts[0];
-      path = parts.slice(1).join("/") || file.name;
+      if (folder) {
+        stripped = parts[0];
+        path = parts.slice(1).join("/") || file.name;
+      } else {
+        path = file.webkitRelativePath;
+      }
       // The shown name keeps the hidden-folder check honest: .git/config is skipped by its full path.
       if (parts.some((part) => part.startsWith("."))) {
         skipped.push({ path: file.webkitRelativePath, reason: "hidden file" });
@@ -102,21 +124,27 @@ async function importFromZip(file) {
   return { files, skipped, stripped: result.stripped_folder || "" };
 }
 
-async function chooseImport(kind, list) {
+// `forcedDest` is the folder the files were dropped on ("" is the config root); without it the best guess is used.
+async function chooseImport(kind, list, forcedDest) {
   if (!list || !list.length) return;
   IMP.error = "";
   IMP.busy = true;
   paintImport();
   try {
     const picked = kind === "zip" ? await importFromZip(list[0]) : await importFromFiles(list, { folder: kind === "folder" });
-    IMP.files = picked.files;
+    IMP.base = picked.files;
     IMP.skipped = picked.skipped;
     IMP.stripped = picked.stripped;
+    IMP.dest = typeof forcedDest === "string" ? forcedDest : defaultImportDest(picked.files, picked.stripped);
+    IMP.picker = folderPicker({ value: IMP.dest, onChange: (folder) => { IMP.dest = folder; applyImportDest(); paintImportSummary(); } });
+    applyImportDest();
     IMP.source = kind === "zip" ? list[0].name : kind === "folder" ? (picked.stripped || "folder") + "/" : `${list.length} file${list.length === 1 ? "" : "s"}`;
-    if (!Object.keys(IMP.files).length) IMP.error = "Nothing in there looks like an nginx config. Skipped files are listed below.";
+    if (!Object.keys(IMP.base).length) IMP.error = "Nothing in there looks like an nginx config. Skipped files are listed below.";
   } catch (error) {
     IMP.error = describeError(error).summary;
+    IMP.base = {};
     IMP.files = {};
+    IMP.picker = null;
   } finally {
     IMP.busy = false;
   }
@@ -136,32 +164,51 @@ function importConflicts() {
 
 function paintImport() {
   const body = $("#importBody");
-  const go = $("#btnImportGo");
-  const status = $("#importStatus");
-  const paths = Object.keys(IMP.files);
-  const conflicts = importConflicts();
   const parts = [];
   parts.push(el("div", { class: "import-sources" },
     pickerButton("Folder", "Keeps sub-folders. Hidden files like .git are skipped.", "folder", { webkitdirectory: "", directory: "", multiple: "" }),
     pickerButton("Files", "Pick one or more .conf files.", "files", { multiple: "" }),
     pickerButton("Zip archive", "A .zip of your nginx folder (up to 30 MB).", "zip", { accept: ".zip,application/zip" })));
+  parts.push(el("p", { class: "field-hint", text: "You can also drop files, a folder or a .zip anywhere on the window." }));
   if (IMP.busy) parts.push(el("div", { class: "status-panel" }, el("span", { class: "spinner" }), "Reading…"));
   if (IMP.error) parts.push(el("div", { class: "status-panel bad" }, el("div", { class: "status-title", text: "Could not import" }), el("div", { class: "status-sub", text: IMP.error })));
+  if (IMP.picker && Object.keys(IMP.base).length) {
+    parts.push(el("div", { class: "field import-dest" }, el("span", { text: "Put the files in:" }), IMP.picker.node));
+  }
+  parts.push(el("div", { id: "importSummary", class: "import-summary" }));
+  if (IMP.skipped.length) {
+    parts.push(el("details", { class: "import-skipped", open: !Object.keys(IMP.base).length },
+      el("summary", { text: `${IMP.skipped.length} skipped` }),
+      el("ul", { class: "result-list" }, ...IMP.skipped.map((item) => el("li", {}, el("span", { class: "mono", title: item.path, text: item.path }), badge2("test", item.reason))))));
+  }
+  body.replaceChildren(...parts);
+  paintImportSummary();
+}
+
+function paintImportSummary() {
+  const box = $("#importSummary");
+  const go = $("#btnImportGo");
+  const status = $("#importStatus");
+  if (!box) return;
+  const paths = Object.keys(IMP.files);
+  const conflicts = importConflicts();
+  const bad = IMP.picker ? IMP.picker.problem() : "";
+  const parts = [];
   if (paths.length) {
     const replacing = IMP.mode === "replace";
     parts.push(el("div", { class: "status-panel ok" },
       el("div", { class: "status-title", text: `${paths.length} file${paths.length === 1 ? "" : "s"} from ${IMP.source}` }),
       el("div", { class: "status-sub", text: `${paths.length - conflicts.length} new${conflicts.length ? ` · ${conflicts.length} already exist` : ""}${IMP.stripped && IMP.source !== IMP.stripped + "/" ? ` · folder “${IMP.stripped}” removed from the paths` : ""}` })));
     parts.push(el("div", { class: "import-mode" },
-      el("label", { class: "check" }, el("input", { type: "radio", name: "importMode", checked: !replacing, onchange: () => { IMP.mode = "merge"; paintImport(); } }), el("span", { text: "Add to the current files" })),
-      el("label", { class: "check" }, el("input", { type: "radio", name: "importMode", checked: replacing, onchange: () => { IMP.mode = "replace"; paintImport(); } }), el("span", { text: "Replace the current files (nginx.conf is kept unless the import has its own)" }))));
+      el("label", { class: "check" }, el("input", { type: "radio", name: "importMode", checked: !replacing, onchange: () => { IMP.mode = "merge"; paintImportSummary(); } }), el("span", { text: "Add to the current files" })),
+      el("label", { class: "check" }, el("input", { type: "radio", name: "importMode", checked: replacing, onchange: () => { IMP.mode = "replace"; paintImportSummary(); } }), el("span", { text: "Replace the current files (nginx.conf is kept unless the import has its own)" }))));
     if (conflicts.length && !replacing) {
-      parts.push(el("label", { class: "check" }, el("input", { type: "checkbox", checked: IMP.overwrite, onchange: (event) => { IMP.overwrite = event.target.checked; paintImport(); } }),
+      parts.push(el("label", { class: "check" }, el("input", { type: "checkbox", checked: IMP.overwrite, onchange: (event) => { IMP.overwrite = event.target.checked; paintImportSummary(); } }),
         el("span", { text: `Overwrite the ${conflicts.length} file${conflicts.length === 1 ? "" : "s"} that already exist${conflicts.length === 1 ? "s" : ""} (otherwise they are left as they are)` })));
     }
     if (replacing) {
       const removed = state.doc.files.filter((file) => !(file.path in IMP.files) && file.path !== state.doc.entrypoint).length;
-      parts.push(el("p", { class: "notice", text: `${removed} current file${removed === 1 ? "" : "s"} not in the import will be removed when you apply.` }));
+      parts.push(el("p", { class: "notice", text: `${removed} current file${removed === 1 ? "" : "s"} not in the import will be removed when you save.` }));
     }
     parts.push(el("ul", { class: "result-list import-list" }, ...paths.sort().map((path) => {
       const exists = conflicts.includes(path);
@@ -169,13 +216,8 @@ function paintImport() {
         exists ? badge2(replacing || IMP.overwrite ? "warn" : "test", replacing || IMP.overwrite ? "OVERWRITES" : "EXISTS · KEPT") : badge2("good", "NEW"));
     })));
   }
-  if (IMP.skipped.length) {
-    parts.push(el("details", { class: "import-skipped", open: !paths.length },
-      el("summary", { text: `${IMP.skipped.length} skipped` }),
-      el("ul", { class: "result-list" }, ...IMP.skipped.map((item) => el("li", {}, el("span", { class: "mono", title: item.path, text: item.path }), badge2("test", item.reason))))));
-  }
-  body.replaceChildren(...parts);
-  go.disabled = IMP.busy || !paths.length;
+  box.replaceChildren(...parts);
+  go.disabled = IMP.busy || !paths.length || !!bad;
   go.textContent = paths.length ? `Add ${paths.length} file${paths.length === 1 ? "" : "s"} to draft` : "Add to draft";
   status.textContent = "";
 }
@@ -246,7 +288,7 @@ async function runImport() {
     if (replaced) bits.push(`${replaced} overwritten`);
     if (removed.length) bits.push(`${removed.length} marked for removal`);
     if (failed.length) bits.push(`${failed.length} could not be parsed`);
-    toast(`Import is a draft: ${bits.join(", ")}. Press Apply to nginx to write it.`);
+    toast(`Import is a draft: ${bits.join(", ")}. Press Save to write it.`);
     if (failed.length) showProblem("Some files were not imported", "IMPORT", `${failed.length} file${failed.length === 1 ? "" : "s"} could not be read as nginx configuration.`, failed.map((item) => `${item.path}: ${item.reason}`).join("\n"));
   } finally {
     IMP.busy = false;
@@ -254,5 +296,4 @@ async function runImport() {
   }
 }
 
-$("#importBtn").addEventListener("click", () => openImportDialog().catch(report));
 $("#btnImportGo").addEventListener("click", () => runImport().catch(report));

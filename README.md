@@ -131,6 +131,20 @@ Set `GIT_REPO_URL` (an `https://` URL, for example a private GitHub repository) 
 - `GIT_MODE` is `pull` (default), `push` or `both`. `GIT_SUBDIR` picks a folder inside the repository. Nothing is ever deleted from the config folder by a pull.
 - Treat the repository as private: configs can contain passwords (for example `auth_basic` or upstream credentials).
 
+## Editing
+
+Every file opens in one of three views:
+
+- **Basic** works like Nginx Proxy Manager: one card per site with its domain names, where it forwards to (an app, a folder or a redirect), and switches for SSL, Force HTTPS, HTTP/2 (on by default), WebSocket support, blocking common exploits, caching assets and HSTS. Anything Basic cannot show stays untouched and is counted as "N more settings".
+- **Blocks** is the full editor. Every directive and block can carry a comment on the same line (`listen 443 ssl;  # Listen on https`), and comments stay where they were written. The Blocks tab on the right is the block library: ready-made sections you can drag in. Save your own (from a selection or from scratch) and edit or delete them later; built-in ones can be duplicated.
+- **Nginx** is the plain text.
+
+**Save** writes the changes, tests them and reloads, and rolls back if the test fails. **Enabled** turns a config on or off. If the config already failed before your change and every error is in files you did not touch, the change is kept, nginx is not reloaded, and you get an amber notice naming those files.
+
+**Files.** New files and imports default to `conf.d` (any folder can be typed; nginx only loads subfolders if you include them, for example `include /etc/nginx/conf.d/*/*.conf;`). Drop files, a folder or a zip onto a folder in the tree to import there, drag rows to move them, and double-click or press F2 to rename. The **Tasks** button lists what is running in the background (certificate requests, git sync, DNS updates). Only one certificate request runs at a time.
+
+**HTTPS.** Enable HTTPS lets you pick an existing certificate (best fit first), issue a new one, make a self-signed one, point at a certificate folder, or type paths. When a config points at `/etc/letsencrypt/live/<name>/` and that certificate does not exist yet, a name that is one of the site's own names is issued automatically for the site's names; any other name asks what the certificate should contain.
+
 ## Turning configs on and off
 
 Home and the file tree can turn a config off. That renames `name.conf` to `name.conf.disabled` (nginx stops loading it), tests the result, reloads, and puts everything back if the test fails. Turning it on renames it back. Nothing is deleted.
@@ -182,7 +196,9 @@ The image is built on `nginx:1.27-alpine` and keeps its start-up scripts (`/dock
 | `nginx_model/` | Vendored from `nginx_attempt2`: the lossless parser, renderer, editing and validation |
 | `settings.py` | Settings and secrets, environment precedence, write-only secrets |
 | `notify.py` | Discord and SMTP notifications |
-| `certs.py` | certbot wrapper for DNS-01 issue and renewal |
+| `certs.py` | certbot wrapper for DNS-01 issue and renewal, certificate folders |
+| `tasks.py` | The list of running and finished background jobs |
+| `recipes.py` | The user's saved blocks (block library) |
 | `cloudflare.py` | Cloudflare API client: zones, A records, moving records between IPs, retries |
 | `whoami.py` | Public IP lookup through whoami URLs (Traefik whoami format or a bare IP) |
 | `ipsync.py` | The cloudflare_updater behaviour: IP change detection, record moves, welcome and restart mail |
