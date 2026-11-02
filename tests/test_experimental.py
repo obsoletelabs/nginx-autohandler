@@ -277,6 +277,7 @@ class ApplyThroughServerTests(unittest.TestCase):
         self.assertTrue(result["saved"])
         self.assertIn("z.example.com", (self.root / "conf.d" / "a.conf").read_text(encoding="utf-8"))
         self.assertEqual(timeline.recent()[0]["kind"], "applied")
+        self.assertIn("z.example.com", timeline.recent()[0].get("diff", ""))
 
     def test_a_rejected_change_is_rolled_back(self):
         before = (self.root / "conf.d" / "a.conf").read_text(encoding="utf-8")

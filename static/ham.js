@@ -112,9 +112,24 @@
   }
   function reportApply(result) {
     const info = describeApply(result);
-    if (info.kind === "bad") showOutput("Change rejected", info.text, "bad"); else toast(info.text, info.kind);
-    return info.kind !== "bad";
+    if (info.kind === "bad") { showOutput("Change rejected", info.text, "bad"); return false; }
+    const undoable = result.saved && Array.isArray(result.changed) && result.changed.length === 1 && !result.created;
+    toast(info.text, info.kind, undoable ? { label: "Undo", run: () => undo(result.changed[0], onUndone) } : undefined);
+    return true;
   }
 
-  window.H = { ready, api, el, toast, sheet, showOutput, bytes, number, ago, toggleTheme, debounce, form, describeApply, reportApply };
+  /** Put a file back the way it was before the last save: restores its newest backup (tested and rolled back like any save). */
+  async function undo(path, done) {
+    try {
+      const { backups } = await api(`/api/backups?path=${encodeURIComponent(path)}`);
+      if (!backups.length) { toast("There is nothing to undo for this file.", "warn"); return; }
+      const result = await api("/api/restore", { path, backup: backups[0].name });
+      if (result.ok === false) showOutput("Undo was rejected", result.output || "nginx did not accept the old version.", "bad");
+      else { toast("Change undone.", "ok"); if (done) done(); }
+    } catch (error) { toast(error.message, "bad"); }
+  }
+  let onUndone = null;
+  const whenUndone = (fn) => { onUndone = fn; };
+
+  window.H = { whenUndone, ready, api, el, toast, sheet, showOutput, bytes, number, ago, toggleTheme, debounce, form, describeApply, reportApply };
 })();

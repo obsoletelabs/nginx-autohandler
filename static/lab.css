@@ -63,3 +63,4 @@ main { padding: 26px clamp(14px, 3vw, 36px) 60px; max-width: 1240px; width: 100%
   .rail .brand, .rail .spacer { display: none; } .rail a, .rail button { width: auto; flex: none; padding: 8px 10px; } .rail a span, .rail button span { white-space: nowrap; }
 }
 .toolbar select { width: auto; min-width: 150px; }
+.diff .add { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); } .diff .del { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }

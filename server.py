@@ -550,7 +550,7 @@ def report_event(title, message, color, detail="", diff="", files=(), kind="info
         message = f"{message}\nFiles: {', '.join(files)}"
     event = {"time": now(), "kind": kind, "title": title, "message": message, "files": files}
     activity.appendleft(event)
-    timeline.record(event)
+    timeline.record({**event, "diff": diff[:6000]} if diff else event)
     notify.fire(notify.config_event, title, message, color, detail, diff)
 
 

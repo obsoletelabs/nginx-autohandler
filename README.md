@@ -145,6 +145,26 @@ Every file opens in one of three views:
 
 **HTTPS.** Enable HTTPS lets you pick an existing certificate (best fit first), issue a new one, make a self-signed one, point at a certificate folder, or type paths. When a config points at `/etc/letsencrypt/live/<name>/` and that certificate does not exist yet, a name that is one of the site's own names is issued automatically for the site's names; any other name asks what the certificate should contain.
 
+## Experimental: the Lab, the phone view and site features
+
+> This section describes the `experimental/go-ham` branch. Everything here goes through the same test-before-reload step as the editor, so a change nginx rejects is rolled back. It is newer than the rest and less battle-tested.
+
+**Lab** (`/lab`, or the Lab button in the top bar). Keys `1` to `6` switch pages.
+
+- **Status:** requests per hour, response classes, busiest pages and visitors, recent 5xx errors and the nginx error log, from nginx's access log (pick any `*access*.log`). Server health comes from a live `nginx -t`.
+- **Sites:** every server block with switches for the advanced settings people look up every time. Each feature is a small form; turning it on adds the nginx it needs (including the zones, caches and upstreams that live one level up) and tags it with a `# feature:<name>` comment so it can be changed or removed cleanly later: rate limit, connection limit, password protection (apr1 hashes stored in the data folder, never in the config or git), IP allow list, security headers, CORS with preflight, gzip, response cache, upload size and timeouts, load balancing over several app servers (round robin, least busy, same visitor), a friendly maintenance error page, and a per-site log file. Plus change domains and target, and turn HTTPS on or off with a certificate picker (HTTPS adds a port 80 redirect by default).
+- **Topology:** an SVG map of domains, sites, load-balancing pools and apps. Hover to follow a path, click a site to manage it.
+- **Search:** find any line across every config file, including turned-off ones. Plain text or regular expressions.
+- **Templates:** one-step new sites: reverse proxy, static site, single-page app, redirect, PHP, load-balanced app, protected API (rate limit, CORS, headers and compression already on), maintenance page, catch-all, and a TCP/UDP proxy (nginx `stream`, written to `stream.d/` with the `include` added to `nginx.conf` for you).
+- **Timeline:** every change, rejection and outside edit with its diff, kept across restarts in `timeline.jsonl` in the data folder.
+- **Undo:** after a save from the Lab or the phone view, the toast offers Undo, which restores the previous version through the same tested apply.
+
+**Phone view** (`/m`). Phones with a coarse pointer and a narrow screen are sent there automatically; `/?desktop=1` opens the full editor. A bottom bar has Status (health, test, reload, traffic), Sites (turn on or off, change domain and target, HTTPS), Certs (expiry, renew now), Tasks and Logs (filter, follow). Big touch targets, light and dark.
+
+**Command palette.** `Ctrl+K` (or `/` outside a text field) on every page: jump to any page, site or file, test or reload nginx, switch theme, open the editor's dialogs. `/?desktop=1#open=<path>` opens a file in the editor.
+
+New endpoints (all behind the same login and CSRF header): `GET /api/sites`, `POST /api/sites/update|https|https/off`, `GET /api/features`, `POST /api/features/apply|disable`, `GET /api/htpasswd`, `GET /api/templates`, `POST /api/templates/create`, `GET /api/stats`, `GET /api/search`, `GET /api/topology`, `GET /api/timeline`, `GET /api/clock`.
+
 ## Turning configs on and off
 
 Home and the file tree can turn a config off. That renames `name.conf` to `name.conf.disabled` (nginx stops loading it), tests the result, reloads, and puts everything back if the test fails. Turning it on renames it back. Nothing is deleted.
@@ -198,6 +218,8 @@ The image is built on `nginx:1.27-alpine` and keeps its start-up scripts (`/dock
 | `notify.py` | Discord and SMTP notifications |
 | `certs.py` | certbot wrapper for DNS-01 issue and renewal, certificate folders |
 | `tasks.py` | The list of running and finished background jobs |
+| `sites.py`, `features.py`, `htpasswd.py`, `templates.py` | Experimental: sites as data, the feature catalogue, password files, site templates |
+| `stats.py`, `explore.py`, `timeline.py` | Experimental: access-log statistics, search and topology, the persistent timeline |
 | `recipes.py` | The user's saved blocks (block library) |
 | `cloudflare.py` | Cloudflare API client: zones, A records, moving records between IPs, retries |
 | `whoami.py` | Public IP lookup through whoami URLs (Traefik whoami format or a bare IP) |

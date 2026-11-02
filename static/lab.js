@@ -85,6 +85,7 @@
         draw();
       } catch (error) { view.replaceChildren(failed(error, load)); }
     };
+    H.whenUndone(() => load());
     const run = async (request, success) => {
       try { const result = await request; if (reportApply(result) && success) success(result); await load(); } catch (error) { toast(error.message, "bad"); }
     };
@@ -313,6 +314,9 @@
       for (const event of events) line.append(el("div", { class: `event ${event.kind || ""}` },
         el("div", { class: "et" }, event.title), el("div", { class: "muted" }, `${String(event.time).slice(11)} · ${ago(event.time)}`),
         el("div", { style: "white-space:pre-wrap" }, String(event.message || "").split("\nFiles:")[0]),
+        event.diff ? el("details", { style: "margin-top:6px" }, el("summary", { class: "muted", style: "cursor:pointer" }, "Show what changed"),
+          el("pre", { class: "out diff" }, String(event.diff).split("
+").map((line) => el("div", { class: line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, line || " ")))) : null,
         event.files && event.files.length ? el("div", { class: "row wrap", style: "margin-top:6px" }, event.files.map((file) => el("a", { class: "chip", href: `/?desktop=1#open=${encodeURIComponent(file)}` }, file))) : null));
     }
     view.replaceChildren(line);

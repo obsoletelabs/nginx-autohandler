@@ -76,6 +76,7 @@
         })));
       } catch (error) { main.replaceChildren(failed(error, load)); }
     };
+    H.whenUndone(() => load());
     await load();
   }
 
