@@ -103,7 +103,10 @@ def scope_information(document):
     # Unreferenced files still need an editing context; expose this as a fallback.
     unreferenced = [path for path, contexts in file_contexts.items() if not contexts]
     for path in unreferenced:
-        visit_file(path, document.context, [])
+        # A file nothing includes yet is almost always a site or stream fragment meant for conf.d-style
+        # folders, not a second main file, so it is edited as http (or stream under stream*/ folders).
+        streamy = any(part.startswith("stream") for part in path.split("/")[:-1])
+        visit_file(path, "stream" if streamy else "http", [])
     return {"file_contexts": {path: sorted(contexts) for path, contexts in file_contexts.items()},
             "unreferenced": unreferenced}, placements
 

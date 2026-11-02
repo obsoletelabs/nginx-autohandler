@@ -803,6 +803,26 @@ class ExternalCertificateTests(unittest.TestCase):
         self.assertTrue((self.external / "site-a" / "fullchain.pem").exists())
 
 
+class UnreferencedFileScopeTests(unittest.TestCase):
+    def test_files_nothing_includes_are_edited_as_http_so_sites_can_be_added(self):
+        import workshop
+        from nginx_model import Document
+        from nginx_model.validation import scope_information
+        root = pathlib.Path(tempfile.mkdtemp(prefix="scope-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "nginx.conf").write_text("events {}\nhttp {\n include /etc/nginx/conf.d/*.conf;\n}\n")
+        (root / "conf.d" / "hii").mkdir(parents=True)
+        (root / "conf.d" / "a.conf").write_text("")
+        (root / "conf.d" / "hii" / "guu.conf").write_text("")
+        (root / "stream.d").mkdir()
+        (root / "stream.d" / "tcp.conf").write_text("")
+        scopes, _ = scope_information(Document.from_dict(workshop.load(root)))
+        self.assertEqual(scopes["file_contexts"]["conf.d/hii/guu.conf"], ["http"])
+        self.assertEqual(scopes["file_contexts"]["stream.d/tcp.conf"], ["stream"])
+        self.assertEqual(scopes["file_contexts"]["conf.d/a.conf"], ["http"])
+        self.assertEqual(sorted(scopes["unreferenced"]), ["conf.d/hii/guu.conf", "stream.d/tcp.conf"])
+
+
 class CertificateFolderTests(ExternalCertificateTests):
     def test_folder_info_reads_a_pair_and_rejects_other_places(self):
         self.make_pair(self.external / "site-a", "fullchain.pem", "privkey.pem", "a.example.com")

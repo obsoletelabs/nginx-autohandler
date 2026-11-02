@@ -618,6 +618,11 @@ function renderBasicV2(canvas) {
   const rootContexts = contextsFor(null);
   canvas.append(el("div", { class: "basic-intro" }, el("div", { class: "eyebrow", text: "YOUR SITES" }), el("h2", { text: "Sites in this file" }),
     el("p", { text: "Changes are added to the draft as you make them. Press Save when you are ready to put them live." })));
+  if ((state.rendered?.unreferenced || []).includes(state.file)) {
+    const folder = state.file.includes("/") ? "/etc/nginx/" + state.file.split("/").slice(0, -1).join("/") : "";
+    canvas.append(el("p", { class: "hint warn", text: "nginx does not load this file yet: no include in nginx.conf reaches it." +
+      (folder ? ` Add  include ${folder}/*.conf;  inside the http block (for a whole tree of folders, include /etc/nginx/conf.d/*/*.conf;).` : "") }));
+  }
   if (!rootContexts.some((c) => ["http", "main"].includes(c))) {
     canvas.append(el("p", { class: "hint", text: "Basic shows websites. This file holds other kinds of settings, so use the Blocks view." }));
     return;
