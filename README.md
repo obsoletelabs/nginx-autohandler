@@ -1,5 +1,7 @@
 # nginx-autohandler
 
+## This is AI generated, and used as a overall proof of concept and planning phase for a future project. It should work, but will have minor issues due to not the most extensive testing.
+
 One container that runs nginx with a web editor for its config, DNS-01 certificates from Let's Encrypt, Cloudflare DNS, and notifications to Discord and email.
 
 - **Files:** browse, view, edit, create and delete under `/etc/nginx`.
